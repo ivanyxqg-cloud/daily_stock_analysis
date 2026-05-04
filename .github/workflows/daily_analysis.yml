@@ -315,6 +315,11 @@ jobs:
           # ==========================================
           REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
+          REPORT_PROFILE: ${{ vars.REPORT_PROFILE || secrets.REPORT_PROFILE || '' }}
+          PORTFOLIO_STOCK_LIST: ${{ vars.PORTFOLIO_STOCK_LIST || secrets.PORTFOLIO_STOCK_LIST || '' }}
+          OPPORTUNITY_MAX: ${{ vars.OPPORTUNITY_MAX || secrets.OPPORTUNITY_MAX || '8' }}
+          RISK_WATCH_MAX: ${{ vars.RISK_WATCH_MAX || secrets.RISK_WATCH_MAX || '8' }}
+          REPORT_SUMMARY_ONLY: ${{ vars.REPORT_SUMMARY_ONLY || secrets.REPORT_SUMMARY_ONLY || 'false' }}
           SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
           MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
           ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}

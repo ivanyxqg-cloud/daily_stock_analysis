@@ -40,13 +40,20 @@ if ! gh auth status >/dev/null 2>&1; then
 fi
 
 stock_list="NVDA,MSFT,AAPL,AMZN,GOOGL,META,TSLA,AMD,AVGO,TSM,PLTR,JPM,V,LLY,COST,SPY,QQQ,SMH,TLT,GLD,BABA,CRWV,OKLO,SNDK,VRT,SPX,NASDAQ,VIX,IWM,XLK,XLF,XLE,HYG,UUP"
+portfolio_stock_list="AVGO,BABA,CRWV,OKLO,PLTR,QQQ,SNDK,TSM,VRT"
 
 echo "Configuring repository Variables on $repo..."
 gh variable set OPENAI_MODEL --repo "$repo" --body "gpt-5.4-mini"
 gh variable set REPORT_LANGUAGE --repo "$repo" --body "zh"
 gh variable set MARKET_REVIEW_REGION --repo "$repo" --body "us"
 gh variable set MARKET_REVIEW_ENABLED --repo "$repo" --body "true"
-gh variable set REPORT_TYPE --repo "$repo" --body "simple"
+gh variable set REPORT_TYPE --repo "$repo" --body "full"
+gh variable set REPORT_PROFILE --repo "$repo" --body "us_investment_radar"
+gh variable set REPORT_SUMMARY_ONLY --repo "$repo" --body "false"
+gh variable set SINGLE_STOCK_NOTIFY --repo "$repo" --body "false"
+gh variable set PORTFOLIO_STOCK_LIST --repo "$repo" --body "$portfolio_stock_list"
+gh variable set OPPORTUNITY_MAX --repo "$repo" --body "8"
+gh variable set RISK_WATCH_MAX --repo "$repo" --body "8"
 gh variable set MAX_WORKERS --repo "$repo" --body "1"
 gh variable set ANALYSIS_DELAY --repo "$repo" --body "5"
 gh variable set STOCK_LIST --repo "$repo" --body "$stock_list"

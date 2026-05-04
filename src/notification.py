@@ -51,6 +51,41 @@ from src.notification_sender import (
 logger = logging.getLogger(__name__)
 
 
+US_INVESTMENT_RISK_PROXIES = {
+    "VIX",
+    "TLT",
+    "HYG",
+    "UUP",
+    "GLD",
+    "SPY",
+    "QQQ",
+    "SMH",
+    "IWM",
+    "XLK",
+    "XLF",
+    "XLE",
+    "SPX",
+    "NASDAQ",
+}
+
+US_INVESTMENT_RISK_PROXY_ORDER = [
+    "VIX",
+    "TLT",
+    "HYG",
+    "UUP",
+    "GLD",
+    "SPY",
+    "QQQ",
+    "SMH",
+    "IWM",
+    "XLK",
+    "XLF",
+    "XLE",
+    "SPX",
+    "NASDAQ",
+]
+
+
 class NotificationChannel(Enum):
     """通知渠道类型"""
     WECHAT = "wechat"      # 企业微信
@@ -243,10 +278,250 @@ class NotificationService(
         report_date: Optional[str] = None,
     ) -> str:
         """Generate the aggregate report content used by merge/save/push paths."""
+        config = get_config()
+        if getattr(config, "report_profile", "") == "us_investment_radar":
+            return self.generate_us_investment_radar_report(results, report_date=report_date)
         normalized_type = self._normalize_report_type(report_type)
         if normalized_type == ReportType.BRIEF:
             return self.generate_brief_report(results, report_date=report_date)
         return self.generate_dashboard_report(results, report_date=report_date)
+
+    def generate_us_investment_radar_report(
+        self,
+        results: List[AnalysisResult],
+        report_date: Optional[str] = None,
+    ) -> str:
+        """Generate a mobile-friendly US radar report for holdings plus opportunity discovery."""
+        config = get_config()
+        if report_date is None:
+            report_date = datetime.now().strftime('%Y-%m-%d')
+
+        report_language = self._get_report_language(results)
+        labels = get_report_labels(report_language)
+        portfolio_codes = {
+            code.upper()
+            for code in getattr(config, "portfolio_stock_list", []) or []
+            if code
+        }
+        opportunity_max = max(1, int(getattr(config, "opportunity_max", 8) or 8))
+        risk_watch_max = max(1, int(getattr(config, "risk_watch_max", 8) or 8))
+
+        sorted_results = sorted(results, key=lambda r: getattr(r, "sentiment_score", 0), reverse=True)
+        result_by_code = {getattr(r, "code", "").upper(): r for r in sorted_results}
+        holdings = [result_by_code[c] for c in portfolio_codes if c in result_by_code]
+        holdings.sort(key=lambda r: getattr(r, "sentiment_score", 0), reverse=True)
+
+        ordered_risk = [
+            result_by_code[code]
+            for code in US_INVESTMENT_RISK_PROXY_ORDER
+            if code in result_by_code
+        ]
+        extra_risk = [
+            r for r in sorted_results
+            if getattr(r, "code", "").upper() in US_INVESTMENT_RISK_PROXIES
+            and getattr(r, "code", "").upper() not in US_INVESTMENT_RISK_PROXY_ORDER
+        ]
+        risk_watch = (ordered_risk + extra_risk)[:risk_watch_max]
+        risk_codes = {getattr(r, "code", "").upper() for r in risk_watch}
+        holding_codes = {getattr(r, "code", "").upper() for r in holdings}
+
+        opportunity_candidates = [
+            r for r in sorted_results
+            if getattr(r, "code", "").upper() not in holding_codes
+            and getattr(r, "code", "").upper() not in risk_codes
+        ][:opportunity_max]
+        opportunity_codes = {getattr(r, "code", "").upper() for r in opportunity_candidates}
+
+        buy_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'buy')
+        sell_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'sell')
+        hold_count = sum(1 for r in results if getattr(r, 'decision_type', '') in ('hold', ''))
+
+        lines = [
+            f"# 🧭 {report_date} 美股投资雷达",
+            "",
+            f"> 覆盖 **{len(results)}** 个标的 | 持仓 **{len(holdings)}** | 机会候选 **{len(opportunity_candidates)}** | 风险代理 **{len(risk_watch)}**",
+            f"> 🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} 🔴{labels['sell_label']}:{sell_count}",
+            "",
+            "> 这是条件型雷达，不是无条件买卖指令；最终决策仍以你的仓位、现金流和风险承受能力为准。",
+            "",
+        ]
+
+        if holdings:
+            lines.extend(["## 💼 真实持仓详报", ""])
+            for result in holdings:
+                self._append_us_radar_holding(lines, result, report_language)
+
+        if opportunity_candidates:
+            lines.extend(["## 🔎 机会雷达", ""])
+            lines.append("| 标的 | 信号 | 评分 | 条件型观察 | 关键价位 |")
+            lines.append("|------|------|------|-----------|---------|")
+            for result in opportunity_candidates:
+                lines.append(self._format_us_radar_table_row(result, report_language))
+            lines.append("")
+
+        if risk_watch:
+            lines.extend(["## 🛡️ 风险与情绪雷达", ""])
+            lines.append("| 代理 | 信号 | 评分 | 观察重点 |")
+            lines.append("|------|------|------|---------|")
+            for result in risk_watch:
+                lines.append(self._format_us_risk_table_row(result, report_language))
+            lines.append("")
+
+        remaining = [
+            r for r in sorted_results
+            if getattr(r, "code", "").upper() not in holding_codes
+            and getattr(r, "code", "").upper() not in opportunity_codes
+            and getattr(r, "code", "").upper() not in risk_codes
+        ]
+        if remaining:
+            lines.extend(["## 📋 全池速览", ""])
+            for result in remaining:
+                lines.append(self._format_us_radar_compact_line(result, report_language))
+            lines.append("")
+
+        lines.extend([
+            "---",
+            f"*{labels['generated_at_label']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
+        ])
+        return "\n".join(lines)
+
+    def _append_us_radar_holding(
+        self,
+        lines: List[str],
+        result: AnalysisResult,
+        report_language: str,
+    ) -> None:
+        signal_text, signal_emoji, _ = self._get_signal_level(result)
+        dashboard = result.dashboard if getattr(result, "dashboard", None) else {}
+        core = dashboard.get("core_conclusion", {}) if dashboard else {}
+        intel = dashboard.get("intelligence", {}) if dashboard else {}
+        battle = dashboard.get("battle_plan", {}) if dashboard else {}
+        data_persp = dashboard.get("data_perspective", {}) if dashboard else {}
+        price_data = data_persp.get("price_position", {}) if data_persp else {}
+        sniper = battle.get("sniper_points", {}) if battle else {}
+        position = battle.get("position_strategy", {}) if battle else {}
+        checklist = battle.get("action_checklist", []) if battle else []
+        pos_advice = core.get("position_advice", {}) if core else {}
+
+        name = self._get_display_name(result, report_language)
+        one_sentence = core.get("one_sentence") or result.analysis_summary or "暂无明确结论"
+        holding_advice = (
+            pos_advice.get("has_position")
+            or pos_advice.get("holding_position")
+            or localize_operation_advice(result.operation_advice, report_language)
+        )
+        no_position_advice = (
+            pos_advice.get("no_position")
+            or pos_advice.get("empty_position")
+            or localize_operation_advice(result.operation_advice, report_language)
+        )
+
+        lines.extend([
+            f"### {signal_emoji} {name} ({result.code})",
+            f"**动作**：{signal_text} / {localize_operation_advice(result.operation_advice, report_language)} | **评分**：{result.sentiment_score} | **趋势**：{localize_trend_prediction(result.trend_prediction, report_language)}",
+            f"**一句话**：{one_sentence}",
+            f"**持仓处理**：{holding_advice}",
+            f"**空仓观察**：{no_position_advice}",
+        ])
+
+        key_levels = self._build_us_radar_key_levels(price_data, sniper)
+        if key_levels:
+            lines.append(f"**关键价位**：{key_levels}")
+
+        if position:
+            suggested = position.get("suggested_position")
+            entry = position.get("entry_plan")
+            risk = position.get("risk_control")
+            if suggested:
+                lines.append(f"**仓位建议**：{suggested}")
+            if entry:
+                lines.append(f"**入场节奏**：{entry}")
+            if risk:
+                lines.append(f"**风控条件**：{risk}")
+
+        intel_lines = self._build_us_radar_intel_lines(intel)
+        if intel_lines:
+            lines.extend(intel_lines)
+
+        if checklist:
+            trigger = "；".join(str(item) for item in checklist[:3])
+            lines.append(f"**明日触发条件**：{trigger}")
+
+        lines.append("")
+
+    def _build_us_radar_key_levels(self, price_data: Dict[str, Any], sniper: Dict[str, Any]) -> str:
+        levels = []
+        current = price_data.get("current_price")
+        support = price_data.get("support_level")
+        resistance = price_data.get("resistance_level")
+        ideal = self._clean_sniper_value(sniper.get("ideal_buy")) if sniper else ""
+        stop = self._clean_sniper_value(sniper.get("stop_loss")) if sniper else ""
+        target = self._clean_sniper_value(sniper.get("take_profit")) if sniper else ""
+        if current:
+            levels.append(f"现价 {current}")
+        if support:
+            levels.append(f"支撑 {support}")
+        if resistance:
+            levels.append(f"压力 {resistance}")
+        if ideal and ideal != "N/A":
+            levels.append(f"理想买点 {ideal}")
+        if stop and stop != "N/A":
+            levels.append(f"止损 {stop}")
+        if target and target != "N/A":
+            levels.append(f"目标 {target}")
+        return " | ".join(str(v) for v in levels if v)
+
+    def _build_us_radar_intel_lines(self, intel: Dict[str, Any]) -> List[str]:
+        if not intel:
+            return []
+        lines = []
+        if intel.get("sentiment_summary"):
+            lines.append(f"**消息/情绪**：{intel['sentiment_summary']}")
+        risk_alerts = intel.get("risk_alerts") or []
+        if risk_alerts:
+            lines.append(f"**风险提示**：{'；'.join(str(item) for item in risk_alerts[:2])}")
+        catalysts = intel.get("positive_catalysts") or []
+        if catalysts:
+            lines.append(f"**催化观察**：{'；'.join(str(item) for item in catalysts[:2])}")
+        if intel.get("latest_news"):
+            lines.append(f"**最新动态**：{intel['latest_news']}")
+        return lines
+
+    def _format_us_radar_table_row(self, result: AnalysisResult, report_language: str) -> str:
+        signal_text, signal_emoji, _ = self._get_signal_level(result)
+        dashboard = result.dashboard if getattr(result, "dashboard", None) else {}
+        core = dashboard.get("core_conclusion", {}) if dashboard else {}
+        battle = dashboard.get("battle_plan", {}) if dashboard else {}
+        sniper = battle.get("sniper_points", {}) if battle else {}
+        one_sentence = self._escape_table_text(core.get("one_sentence") or result.analysis_summary or "")
+        levels = self._escape_table_text(self._build_us_radar_key_levels({}, sniper) or "等待关键位确认")
+        name = self._escape_table_text(self._get_display_name(result, report_language))
+        return (
+            f"| {name}({result.code}) | {signal_emoji} {signal_text} | "
+            f"{result.sentiment_score} | {one_sentence[:70] or '观察相对强弱'} | {levels[:70]} |"
+        )
+
+    def _format_us_risk_table_row(self, result: AnalysisResult, report_language: str) -> str:
+        signal_text, signal_emoji, _ = self._get_signal_level(result)
+        dashboard = result.dashboard if getattr(result, "dashboard", None) else {}
+        core = dashboard.get("core_conclusion", {}) if dashboard else {}
+        note = core.get("one_sentence") or result.analysis_summary or localize_trend_prediction(result.trend_prediction, report_language)
+        name = self._escape_table_text(self._get_display_name(result, report_language))
+        return f"| {name}({result.code}) | {signal_emoji} {signal_text} | {result.sentiment_score} | {self._escape_table_text(note)[:80]} |"
+
+    def _format_us_radar_compact_line(self, result: AnalysisResult, report_language: str) -> str:
+        _, signal_emoji, _ = self._get_signal_level(result)
+        name = self._get_display_name(result, report_language)
+        return (
+            f"- {signal_emoji} **{name}({result.code})**："
+            f"{localize_operation_advice(result.operation_advice, report_language)} | "
+            f"评分 {result.sentiment_score} | "
+            f"{localize_trend_prediction(result.trend_prediction, report_language)}"
+        )
+
+    @staticmethod
+    def _escape_table_text(value: Any) -> str:
+        return str(value or "").replace("|", "/").replace("\n", " ").strip()
 
     def _collect_models_used(self, results: List[AnalysisResult]) -> List[str]:
         models: List[str] = []

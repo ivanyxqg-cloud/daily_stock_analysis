@@ -1555,6 +1555,11 @@ class StockAnalysisPipeline:
             report = self._generate_aggregate_report(results, report_type)
             filepath = self.notifier.save_report_to_file(report)
             logger.info(f"决策仪表盘日报已保存: {filepath}")
+            if getattr(self.config, "report_profile", "") == "us_investment_radar":
+                full_report = self.notifier.generate_dashboard_report(results)
+                full_filename = f"report_full_{datetime.now().strftime('%Y%m%d')}.md"
+                full_filepath = self.notifier.save_report_to_file(full_report, filename=full_filename)
+                logger.info(f"完整个股明细报告已保存: {full_filepath}")
         except Exception as e:
             logger.error(f"保存本地报告失败: {e}")
 

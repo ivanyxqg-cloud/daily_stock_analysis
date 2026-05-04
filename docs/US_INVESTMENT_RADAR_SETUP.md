@@ -17,7 +17,13 @@ OPENAI_MODEL=gpt-5.4-mini
 REPORT_LANGUAGE=zh
 MARKET_REVIEW_REGION=us
 MARKET_REVIEW_ENABLED=true
-REPORT_TYPE=simple
+REPORT_TYPE=full
+REPORT_PROFILE=us_investment_radar
+REPORT_SUMMARY_ONLY=false
+SINGLE_STOCK_NOTIFY=false
+PORTFOLIO_STOCK_LIST=AVGO,BABA,CRWV,OKLO,PLTR,QQQ,SNDK,TSM,VRT
+OPPORTUNITY_MAX=8
+RISK_WATCH_MAX=8
 MAX_WORKERS=1
 ANALYSIS_DELAY=5
 STOCK_LIST=NVDA,MSFT,AAPL,AMZN,GOOGL,META,TSLA,AMD,AVGO,TSM,PLTR,JPM,V,LLY,COST,SPY,QQQ,SMH,TLT,GLD,BABA,CRWV,OKLO,SNDK,VRT,SPX,NASDAQ,VIX,IWM,XLK,XLF,XLE,HYG,UUP
@@ -37,6 +43,10 @@ Recommended optional Secrets:
 TAVILY_API_KEYS=your Tavily key
 BRAVE_API_KEYS=your Brave Search key
 ```
+
+`TAVILY_API_KEYS` is recommended for this profile. Without it, the report
+still ranks holdings and opportunities, but news catalysts may degrade to
+technical signals and show "data missing" more often.
 
 ## Assisted Setup
 
@@ -66,6 +76,8 @@ gh run list --repo your-github-name/daily_stock_analysis --workflow daily_analys
 The Telegram report should include:
 
 - individual analysis for the WealthBrain holdings
+- an opportunity radar for non-holding candidates
+- a risk radar for VIX, rates, dollar, gold, credit, and sector proxies
 - US market review with VIX and broad index context
 - semiconductor/AI infrastructure read-through from `SMH`, `AVGO`, `TSM`, `SNDK`, `VRT`, `CRWV`, and `OKLO`
 - rate, dollar, gold, and credit-risk context from `TLT`, `UUP`, `GLD`, and `HYG`

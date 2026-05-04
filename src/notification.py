@@ -328,7 +328,7 @@ class NotificationService(
         opportunity_candidates = [
             r for r in sorted_results
             if getattr(r, "code", "").upper() not in holding_codes
-            and getattr(r, "code", "").upper() not in risk_codes
+            and getattr(r, "code", "").upper() not in US_INVESTMENT_RISK_PROXIES
         ][:opportunity_max]
         opportunity_codes = {getattr(r, "code", "").upper() for r in opportunity_candidates}
 

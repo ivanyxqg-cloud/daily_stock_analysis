@@ -216,6 +216,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
+  python main.py --intraday-radar   # 仅运行美股盘中雷达
         '''
     )
 
@@ -272,6 +273,19 @@ def parse_arguments() -> argparse.Namespace:
         '--market-review',
         action='store_true',
         help='仅运行大盘复盘分析'
+    )
+
+    parser.add_argument(
+        '--intraday-radar',
+        action='store_true',
+        help='仅运行美股盘中雷达提醒'
+    )
+
+    parser.add_argument(
+        '--intraday-window',
+        type=str,
+        default='auto',
+        help='盘中雷达窗口（auto/pre_open/open_15/open_60/midday/power_hour/close_15）'
     )
 
     parser.add_argument(
@@ -817,6 +831,50 @@ def main() -> int:
                 f"回测完成: processed={stats.get('processed')} saved={stats.get('saved')} "
                 f"completed={stats.get('completed')} insufficient={stats.get('insufficient')} errors={stats.get('errors')}"
             )
+            return 0
+
+        # 模式0.5: 美股盘中雷达
+        if getattr(args, 'intraday_radar', False):
+            from src.core.us_intraday_radar import run_us_intraday_radar
+
+            def intraday_task():
+                runtime_config = (
+                    _reload_runtime_config()
+                    if (getattr(args, 'schedule', False) or getattr(config, 'schedule_enabled', False))
+                    else config
+                )
+                ok, message = run_us_intraday_radar(
+                    config=runtime_config,
+                    force_run=getattr(args, 'force_run', False),
+                    requested_window=getattr(args, 'intraday_window', 'auto'),
+                    send_notification=not getattr(args, 'no_notify', False),
+                )
+                if ok:
+                    logger.info("美股盘中雷达完成: %s", message)
+                else:
+                    logger.warning("美股盘中雷达失败: %s", message)
+
+            if args.schedule or config.schedule_enabled:
+                logger.info("模式: 美股盘中雷达定时轮询")
+                from src.scheduler import run_with_schedule
+
+                interval_minutes = max(1, getattr(config, 'us_intraday_poll_interval_minutes', 10))
+                run_with_schedule(
+                    task=lambda: None,
+                    schedule_time=config.schedule_time,
+                    run_immediately=False,
+                    background_tasks=[{
+                        "task": intraday_task,
+                        "interval_seconds": interval_minutes * 60,
+                        "run_immediately": True,
+                        "name": "us_intraday_radar",
+                    }],
+                    schedule_time_provider=_build_schedule_time_provider(config.schedule_time),
+                )
+                return 0
+
+            logger.info("模式: 美股盘中雷达")
+            intraday_task()
             return 0
 
         # 模式1: 仅大盘复盘

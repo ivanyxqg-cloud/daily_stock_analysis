@@ -24,6 +24,15 @@ SINGLE_STOCK_NOTIFY=false
 PORTFOLIO_STOCK_LIST=AVGO,BABA,CRWV,OKLO,PLTR,QQQ,SNDK,TSM,VRT
 OPPORTUNITY_MAX=8
 RISK_WATCH_MAX=8
+US_INTRADAY_RADAR_ENABLED=true
+US_INTRADAY_WINDOWS=pre_open,open_15,open_60,midday,power_hour,close_15
+US_INTRADAY_PUSH_NIGHT=true
+US_INTRADAY_ALERT_HOLDING_CHANGE_PCT=2.5
+US_INTRADAY_ALERT_INDEX_CHANGE_PCT=1.0
+US_INTRADAY_ALERT_VIX_CHANGE_PCT=5.0
+US_INTRADAY_OPPORTUNITY_MAX=5
+US_INTRADAY_REPORT_LANGUAGE=zh
+US_INTRADAY_WINDOW_TOLERANCE_MINUTES=12
 MAX_WORKERS=1
 ANALYSIS_DELAY=5
 STOCK_LIST=NVDA,MSFT,AAPL,AMZN,GOOGL,META,TSLA,AMD,AVGO,TSM,PLTR,JPM,V,LLY,COST,SPY,QQQ,SMH,TLT,GLD,BABA,CRWV,OKLO,SNDK,VRT,SPX,NASDAQ,VIX,IWM,XLK,XLF,XLE,HYG,UUP
@@ -67,10 +76,17 @@ Run the workflow manually:
 gh workflow run daily_analysis.yml --repo your-github-name/daily_stock_analysis -f mode=full -f force_run=true
 ```
 
+Run the intraday radar manually:
+
+```bash
+gh workflow run us_intraday_radar.yml --repo your-github-name/daily_stock_analysis -f window=open_15 -f force_run=true
+```
+
 Then watch recent runs:
 
 ```bash
 gh run list --repo your-github-name/daily_stock_analysis --workflow daily_analysis.yml --limit 3
+gh run list --repo your-github-name/daily_stock_analysis --workflow us_intraday_radar.yml --limit 3
 ```
 
 The Telegram report should include:
@@ -82,3 +98,7 @@ The Telegram report should include:
 - semiconductor/AI infrastructure read-through from `SMH`, `AVGO`, `TSM`, `SNDK`, `VRT`, `CRWV`, and `OKLO`
 - rate, dollar, gold, and credit-risk context from `TLT`, `UUP`, `GLD`, and `HYG`
 - conditional suggestions and explicit risk warnings, not unconditional buy/sell instructions
+
+The intraday radar sends shorter Telegram messages at US-market checkpoints:
+pre-open, open +15m, open +60m, midday, power hour, and close +15m.
+It skips non-trading days and off-window runs unless `force_run=true` is used.

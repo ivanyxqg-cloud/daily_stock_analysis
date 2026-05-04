@@ -692,6 +692,20 @@ class Config:
     agent_event_monitor_interval_minutes: int = 5  # Polling interval for event monitor background checks
     agent_event_alert_rules_json: str = ""  # JSON array of serialized EventMonitor rules
 
+    # === US intraday radar ===
+    us_intraday_radar_enabled: bool = False
+    us_intraday_windows: List[str] = field(default_factory=lambda: [
+        "pre_open", "open_15", "open_60", "midday", "power_hour", "close_15"
+    ])
+    us_intraday_push_night: bool = True
+    us_intraday_alert_holding_change_pct: float = 2.5
+    us_intraday_alert_index_change_pct: float = 1.0
+    us_intraday_alert_vix_change_pct: float = 5.0
+    us_intraday_opportunity_max: int = 5
+    us_intraday_report_language: str = "zh"
+    us_intraday_window_tolerance_minutes: int = 12
+    us_intraday_poll_interval_minutes: int = 10
+
     # === 通知配置（可同时配置多个，全部推送）===
     
     # 企业微信 Webhook
@@ -1394,6 +1408,53 @@ class Config:
                 minimum=1,
             ),
             agent_event_alert_rules_json=os.getenv('AGENT_EVENT_ALERT_RULES_JSON', ''),
+            us_intraday_radar_enabled=os.getenv('US_INTRADAY_RADAR_ENABLED', 'false').lower() == 'true',
+            us_intraday_windows=[
+                item.strip()
+                for item in os.getenv(
+                    'US_INTRADAY_WINDOWS',
+                    'pre_open,open_15,open_60,midday,power_hour,close_15',
+                ).split(',')
+                if item.strip()
+            ],
+            us_intraday_push_night=os.getenv('US_INTRADAY_PUSH_NIGHT', 'true').lower() == 'true',
+            us_intraday_alert_holding_change_pct=parse_env_float(
+                os.getenv('US_INTRADAY_ALERT_HOLDING_CHANGE_PCT'),
+                2.5,
+                field_name='US_INTRADAY_ALERT_HOLDING_CHANGE_PCT',
+                minimum=0.1,
+            ),
+            us_intraday_alert_index_change_pct=parse_env_float(
+                os.getenv('US_INTRADAY_ALERT_INDEX_CHANGE_PCT'),
+                1.0,
+                field_name='US_INTRADAY_ALERT_INDEX_CHANGE_PCT',
+                minimum=0.1,
+            ),
+            us_intraday_alert_vix_change_pct=parse_env_float(
+                os.getenv('US_INTRADAY_ALERT_VIX_CHANGE_PCT'),
+                5.0,
+                field_name='US_INTRADAY_ALERT_VIX_CHANGE_PCT',
+                minimum=0.1,
+            ),
+            us_intraday_opportunity_max=parse_env_int(
+                os.getenv('US_INTRADAY_OPPORTUNITY_MAX'),
+                5,
+                field_name='US_INTRADAY_OPPORTUNITY_MAX',
+                minimum=1,
+            ),
+            us_intraday_report_language=os.getenv('US_INTRADAY_REPORT_LANGUAGE', 'zh').lower(),
+            us_intraday_window_tolerance_minutes=parse_env_int(
+                os.getenv('US_INTRADAY_WINDOW_TOLERANCE_MINUTES'),
+                12,
+                field_name='US_INTRADAY_WINDOW_TOLERANCE_MINUTES',
+                minimum=0,
+            ),
+            us_intraday_poll_interval_minutes=parse_env_int(
+                os.getenv('US_INTRADAY_POLL_INTERVAL_MINUTES'),
+                10,
+                field_name='US_INTRADAY_POLL_INTERVAL_MINUTES',
+                minimum=1,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

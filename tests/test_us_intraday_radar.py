@@ -11,6 +11,7 @@ from src.core.us_intraday_radar import (
     QuoteSnapshot,
     build_quote_snapshots,
     build_us_intraday_radar_report,
+    build_us_intraday_technical_report,
     resolve_us_intraday_window,
 )
 
@@ -102,6 +103,9 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_intraday_alert_index_change_pct=1.0,
             us_intraday_alert_vix_change_pct=5.0,
             us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=5,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -120,11 +124,76 @@ class USIntradayRadarTestCase(unittest.TestCase):
 
         report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
 
-        self.assertIn("需要你看", report)
-        self.assertIn("真实持仓", report)
-        self.assertIn("机会池", report)
+        self.assertIn("一句话结论", report)
+        self.assertIn("需要你处理", report)
+        self.assertIn("你的持仓", report)
+        self.assertIn("市场环境", report)
+        self.assertIn("可以关注", report)
+        self.assertIn("VIX（恐慌指数）", report)
+        self.assertIn("MA20（20日均线", report)
+        self.assertIn("跌破 MA20", report)
+
+    def test_readable_report_limits_action_items(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ", "BABA", "PLTR"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=2,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_15",
+            tolerance_minutes=12,
+            force_run=True,
+            requested_window="open_15",
+            now=datetime(2026, 6, 1, 9, 50, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "QQQ": QuoteSnapshot(code="QQQ", price=100, change_pct=-3.0, ma20=105),
+            "BABA": QuoteSnapshot(code="BABA", price=90, change_pct=-4.0, ma20=100),
+            "PLTR": QuoteSnapshot(code="PLTR", price=200, change_pct=5.0, ma5=180, bias_pct=11.0),
+            "VIX": QuoteSnapshot(code="VIX", price=22, change_pct=6.0),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+        action_section = report.split("## 需要你处理", 1)[1].split("## 你的持仓", 1)[0]
+        action_lines = [line for line in action_section.splitlines() if line.startswith("- ")]
+
+        self.assertLessEqual(len(action_lines), 2)
+
+    def test_technical_report_keeps_raw_indicators_for_artifact(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_15",
+            tolerance_minutes=12,
+            force_run=True,
+            requested_window="open_15",
+            now=datetime(2026, 6, 1, 9, 50, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "QQQ": QuoteSnapshot(code="QQQ", price=100, change_pct=-3.0, ma20=105),
+            "VIX": QuoteSnapshot(code="VIX", price=22, change_pct=6.0),
+            "AAPL": QuoteSnapshot(code="AAPL", price=200, change_pct=1.2, ma5=198, ma10=195, ma20=190, bias_pct=1.0),
+        }
+
+        report = build_us_intraday_technical_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("MA20", report)
+        self.assertIn("乖离", report)
         self.assertIn("VIX 异动", report)
-        self.assertIn("跌破MA20", report)
 
 
 if __name__ == "__main__":

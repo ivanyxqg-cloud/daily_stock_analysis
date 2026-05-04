@@ -705,6 +705,10 @@ class Config:
     us_intraday_report_language: str = "zh"
     us_intraday_window_tolerance_minutes: int = 12
     us_intraday_poll_interval_minutes: int = 10
+    us_intraday_readable_report: bool = True
+    us_intraday_jargon_level: str = "explained"
+    us_intraday_max_action_items: int = 5
+    us_intraday_show_technical_details: bool = False
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1455,6 +1459,18 @@ class Config:
                 field_name='US_INTRADAY_POLL_INTERVAL_MINUTES',
                 minimum=1,
             ),
+            us_intraday_readable_report=os.getenv('US_INTRADAY_READABLE_REPORT', 'true').lower() == 'true',
+            us_intraday_jargon_level=os.getenv('US_INTRADAY_JARGON_LEVEL', 'explained').lower(),
+            us_intraday_max_action_items=parse_env_int(
+                os.getenv('US_INTRADAY_MAX_ACTION_ITEMS'),
+                5,
+                field_name='US_INTRADAY_MAX_ACTION_ITEMS',
+                minimum=1,
+            ),
+            us_intraday_show_technical_details=os.getenv(
+                'US_INTRADAY_SHOW_TECHNICAL_DETAILS',
+                'false',
+            ).lower() == 'true',
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

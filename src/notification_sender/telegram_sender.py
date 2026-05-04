@@ -204,41 +204,78 @@ class TelegramSender:
     
     def _send_telegram_chunked(self, api_url: str, chat_id: str, content: str, max_length: int, message_thread_id: Optional[str] = None) -> bool:
         """分段发送长 Telegram 消息"""
-        # 按段落分割
-        sections = content.split("\n---\n")
-        
-        current_chunk = []
-        current_length = 0
         all_success = True
-        chunk_index = 1
-        
-        for section in sections:
-            section_length = len(section) + 5  # +5 for "\n---\n"
-            
-            if current_length + section_length > max_length:
-                # 发送当前块
-                if current_chunk:
-                    chunk_content = "\n---\n".join(current_chunk)
-                    logger.info(f"发送 Telegram 消息块 {chunk_index}...")
-                    if not self._send_telegram_message(api_url, chat_id, chunk_content, message_thread_id):
-                        all_success = False
-                    chunk_index += 1
-                
-                # 重置
-                current_chunk = [section]
-                current_length = section_length
-            else:
-                current_chunk.append(section)
-                current_length += section_length
-        
-        # 发送最后一块
-        if current_chunk:
-            chunk_content = "\n---\n".join(current_chunk)
-            logger.info(f"发送 Telegram 消息块 {chunk_index}...")
+        chunks = self._split_telegram_chunks(content, max_length)
+
+        for chunk_index, chunk_content in enumerate(chunks, start=1):
+            logger.info(f"发送 Telegram 消息块 {chunk_index}/{len(chunks)}...")
             if not self._send_telegram_message(api_url, chat_id, chunk_content, message_thread_id):
                 all_success = False
-                
+
         return all_success
+
+    @staticmethod
+    def _split_telegram_chunks(content: str, max_length: int) -> list[str]:
+        """Split long Markdown into Telegram-safe chunks.
+
+        Telegram rejects messages over 4096 characters. Keep raw chunks below
+        that ceiling because Markdown conversion can add escaping characters.
+        """
+        chunk_limit = min(max_length, 3200)
+        chunks: list[str] = []
+        current = ""
+
+        def flush_current() -> None:
+            nonlocal current
+            stripped = current.strip()
+            if stripped:
+                chunks.append(stripped)
+            current = ""
+
+        def append_oversized_block(block: str) -> None:
+            nonlocal current
+            flush_current()
+            line_buffer = ""
+            for line in block.splitlines(keepends=True):
+                if len(line) > chunk_limit:
+                    if line_buffer.strip():
+                        chunks.append(line_buffer.strip())
+                        line_buffer = ""
+                    for start in range(0, len(line), chunk_limit):
+                        piece = line[start:start + chunk_limit].strip()
+                        if piece:
+                            chunks.append(piece)
+                    continue
+
+                if len(line_buffer) + len(line) > chunk_limit:
+                    if line_buffer.strip():
+                        chunks.append(line_buffer.strip())
+                    line_buffer = line
+                else:
+                    line_buffer += line
+
+            if line_buffer.strip():
+                chunks.append(line_buffer.strip())
+
+        # Preserve paragraph readability where possible; split further by lines
+        # only when a paragraph itself is too large.
+        blocks = re.split(r'(\n\s*\n)', content)
+        for block in blocks:
+            if not block:
+                continue
+
+            if len(block) > chunk_limit:
+                append_oversized_block(block)
+                continue
+
+            if len(current) + len(block) > chunk_limit:
+                flush_current()
+                current = block
+            else:
+                current += block
+
+        flush_current()
+        return chunks
 
     def _send_telegram_photo(self, image_bytes: bytes) -> bool:
         """Send image via Telegram sendPhoto API (Issue #289)."""

@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import os
+import tempfile
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -13,6 +15,7 @@ from src.core.us_intraday_radar import (
     build_us_intraday_radar_report,
     build_us_intraday_technical_report,
     resolve_us_intraday_window,
+    run_us_intraday_radar,
 )
 
 
@@ -25,6 +28,15 @@ class FakeFetcher:
 
     def get_daily_data(self, code, days=30):
         return pd.DataFrame({"close": list(range(80, 110))}), "fake"
+
+
+class FakeNotifier:
+    def __init__(self):
+        self.messages = []
+
+    def send(self, message):
+        self.messages.append(message)
+        return True
 
 
 class USIntradayRadarTestCase(unittest.TestCase):
@@ -54,6 +66,20 @@ class USIntradayRadarTestCase(unittest.TestCase):
             )
 
         self.assertEqual(match.skip_reason, "当前不在已配置的盘中提醒窗口")
+
+    def test_resolves_open_30_window(self):
+        now = datetime(2026, 6, 1, 10, 4, tzinfo=ZoneInfo("America/New_York"))
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            match = resolve_us_intraday_window(
+                enabled=True,
+                configured_windows="open_15,open_30,open_60",
+                tolerance_minutes=18,
+                now=now,
+            )
+
+        self.assertEqual(match.window.key, "open_30")
+        self.assertFalse(match.skip_reason)
 
     def test_non_trading_day_skips_without_force(self):
         now = datetime(2026, 5, 2, 9, 47, tzinfo=ZoneInfo("America/New_York"))
@@ -194,6 +220,132 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertIn("MA20", report)
         self.assertIn("乖离", report)
         self.assertIn("VIX 异动", report)
+
+    def test_dedupe_skips_existing_window_marker(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            stock_list=["QQQ", "VIX"],
+            us_intraday_radar_enabled=True,
+            us_intraday_windows=["open_30"],
+            us_intraday_window_tolerance_minutes=18,
+            us_intraday_push_night=True,
+            us_intraday_dedupe_enabled=True,
+            us_intraday_dedupe_lookback_hours=24,
+        )
+        notifier = FakeNotifier()
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            ok, message = run_us_intraday_radar(
+                config=config,
+                requested_window="open_30",
+                send_notification=True,
+                fetcher_manager=FakeFetcher({}),
+                notifier=notifier,
+                now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+                dedupe_checker=lambda marker_name, lookback_hours: True,
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("已发送过", message)
+        self.assertEqual(notifier.messages, [])
+
+    def test_force_run_bypasses_dedupe(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            stock_list=["QQQ", "VIX"],
+            us_intraday_radar_enabled=True,
+            us_intraday_windows=["open_30"],
+            us_intraday_window_tolerance_minutes=18,
+            us_intraday_push_night=True,
+            us_intraday_dedupe_enabled=True,
+            us_intraday_dedupe_lookback_hours=24,
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=5,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
+            us_intraday_show_technical_details=False,
+            bias_threshold=5.0,
+        )
+        notifier = FakeNotifier()
+        fetcher = FakeFetcher({
+            "QQQ": {"name": "QQQ", "price": 100, "change_pct": 0.5},
+            "VIX": {"name": "VIX", "price": 20, "change_pct": 1.0},
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+                    ok, message = run_us_intraday_radar(
+                        config=config,
+                        force_run=True,
+                        requested_window="open_30",
+                        send_notification=True,
+                        fetcher_manager=fetcher,
+                        notifier=notifier,
+                        now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+                        dedupe_checker=lambda marker_name, lookback_hours: True,
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(ok)
+        self.assertIn("us_intraday_radar_20260601_open_30.md", message)
+        self.assertEqual(len(notifier.messages), 1)
+
+    def test_successful_non_force_run_writes_dedupe_marker(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            stock_list=["QQQ", "VIX"],
+            us_intraday_radar_enabled=True,
+            us_intraday_windows=["open_30"],
+            us_intraday_window_tolerance_minutes=18,
+            us_intraday_push_night=True,
+            us_intraday_dedupe_enabled=True,
+            us_intraday_dedupe_lookback_hours=24,
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=5,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
+            us_intraday_show_technical_details=False,
+            bias_threshold=5.0,
+        )
+        notifier = FakeNotifier()
+        fetcher = FakeFetcher({
+            "QQQ": {"name": "QQQ", "price": 100, "change_pct": 0.5},
+            "VIX": {"name": "VIX", "price": 20, "change_pct": 1.0},
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+                    ok, message = run_us_intraday_radar(
+                        config=config,
+                        requested_window="open_30",
+                        send_notification=True,
+                        fetcher_manager=fetcher,
+                        notifier=notifier,
+                        now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+                        dedupe_checker=lambda marker_name, lookback_hours: False,
+                    )
+                marker_path = os.path.join("reports", "us-intraday-sent-20260601-open_30")
+                marker_exists = os.path.exists(marker_path)
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(ok)
+        self.assertIn("us_intraday_radar_20260601_open_30.md", message)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertTrue(marker_exists)
 
 
 if __name__ == "__main__":

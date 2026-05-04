@@ -25,18 +25,20 @@ PORTFOLIO_STOCK_LIST=AVGO,BABA,CRWV,OKLO,PLTR,QQQ,SNDK,TSM,VRT
 OPPORTUNITY_MAX=8
 RISK_WATCH_MAX=8
 US_INTRADAY_RADAR_ENABLED=true
-US_INTRADAY_WINDOWS=pre_open,open_15,open_60,midday,power_hour,close_15
+US_INTRADAY_WINDOWS=pre_open,open_15,open_30,open_60,midday,power_hour,close_15
 US_INTRADAY_PUSH_NIGHT=true
 US_INTRADAY_ALERT_HOLDING_CHANGE_PCT=2.5
 US_INTRADAY_ALERT_INDEX_CHANGE_PCT=1.0
 US_INTRADAY_ALERT_VIX_CHANGE_PCT=5.0
 US_INTRADAY_OPPORTUNITY_MAX=5
 US_INTRADAY_REPORT_LANGUAGE=zh
-US_INTRADAY_WINDOW_TOLERANCE_MINUTES=12
+US_INTRADAY_WINDOW_TOLERANCE_MINUTES=18
 US_INTRADAY_READABLE_REPORT=true
 US_INTRADAY_JARGON_LEVEL=explained
 US_INTRADAY_MAX_ACTION_ITEMS=5
 US_INTRADAY_SHOW_TECHNICAL_DETAILS=false
+US_INTRADAY_DEDUPE_ENABLED=true
+US_INTRADAY_DEDUPE_LOOKBACK_HOURS=24
 MAX_WORKERS=1
 ANALYSIS_DELAY=5
 STOCK_LIST=NVDA,MSFT,AAPL,AMZN,GOOGL,META,TSLA,AMD,AVGO,TSM,PLTR,JPM,V,LLY,COST,SPY,QQQ,SMH,TLT,GLD,BABA,CRWV,OKLO,SNDK,VRT,SPX,NASDAQ,VIX,IWM,XLK,XLF,XLE,HYG,UUP
@@ -104,5 +106,7 @@ The Telegram report should include:
 - conditional suggestions and explicit risk warnings, not unconditional buy/sell instructions
 
 The intraday radar sends shorter Telegram messages at US-market checkpoints:
-pre-open, open +15m, open +60m, midday, power hour, and close +15m.
+pre-open, open +15m, open +30m, open +60m, midday, power hour, and close +15m.
 It skips non-trading days and off-window runs unless `force_run=true` is used.
+The workflow also polls every 5 minutes during the US session and uses marker artifacts
+to prevent duplicate Telegram pushes for the same trading-day window.

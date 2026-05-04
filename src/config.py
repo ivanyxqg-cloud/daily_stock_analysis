@@ -695,7 +695,7 @@ class Config:
     # === US intraday radar ===
     us_intraday_radar_enabled: bool = False
     us_intraday_windows: List[str] = field(default_factory=lambda: [
-        "pre_open", "open_15", "open_60", "midday", "power_hour", "close_15"
+        "pre_open", "open_15", "open_30", "open_60", "midday", "power_hour", "close_15"
     ])
     us_intraday_push_night: bool = True
     us_intraday_alert_holding_change_pct: float = 2.5
@@ -703,12 +703,14 @@ class Config:
     us_intraday_alert_vix_change_pct: float = 5.0
     us_intraday_opportunity_max: int = 5
     us_intraday_report_language: str = "zh"
-    us_intraday_window_tolerance_minutes: int = 12
+    us_intraday_window_tolerance_minutes: int = 18
     us_intraday_poll_interval_minutes: int = 10
     us_intraday_readable_report: bool = True
     us_intraday_jargon_level: str = "explained"
     us_intraday_max_action_items: int = 5
     us_intraday_show_technical_details: bool = False
+    us_intraday_dedupe_enabled: bool = True
+    us_intraday_dedupe_lookback_hours: int = 24
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1417,7 +1419,7 @@ class Config:
                 item.strip()
                 for item in os.getenv(
                     'US_INTRADAY_WINDOWS',
-                    'pre_open,open_15,open_60,midday,power_hour,close_15',
+                    'pre_open,open_15,open_30,open_60,midday,power_hour,close_15',
                 ).split(',')
                 if item.strip()
             ],
@@ -1449,7 +1451,7 @@ class Config:
             us_intraday_report_language=os.getenv('US_INTRADAY_REPORT_LANGUAGE', 'zh').lower(),
             us_intraday_window_tolerance_minutes=parse_env_int(
                 os.getenv('US_INTRADAY_WINDOW_TOLERANCE_MINUTES'),
-                12,
+                18,
                 field_name='US_INTRADAY_WINDOW_TOLERANCE_MINUTES',
                 minimum=0,
             ),
@@ -1471,6 +1473,13 @@ class Config:
                 'US_INTRADAY_SHOW_TECHNICAL_DETAILS',
                 'false',
             ).lower() == 'true',
+            us_intraday_dedupe_enabled=os.getenv('US_INTRADAY_DEDUPE_ENABLED', 'true').lower() == 'true',
+            us_intraday_dedupe_lookback_hours=parse_env_int(
+                os.getenv('US_INTRADAY_DEDUPE_LOOKBACK_HOURS'),
+                24,
+                field_name='US_INTRADAY_DEDUPE_LOOKBACK_HOURS',
+                minimum=1,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

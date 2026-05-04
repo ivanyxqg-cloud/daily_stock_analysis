@@ -6,8 +6,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -79,6 +82,7 @@ class QuoteSnapshot:
 WINDOW_DEFS: Dict[str, IntradayWindow] = {
     "pre_open": IntradayWindow("pre_open", "盘前5分钟", time(9, 25), "今日重点与隔夜风险"),
     "open_15": IntradayWindow("open_15", "开盘15分钟", time(9, 45), "开盘真假强弱"),
+    "open_30": IntradayWindow("open_30", "开盘30分钟", time(10, 0), "早盘方向是否站稳"),
     "open_60": IntradayWindow("open_60", "开盘60分钟", time(10, 30), "追还是等回踩"),
     "midday": IntradayWindow("midday", "午盘", time(12, 0), "趋势延续或冲高回落"),
     "power_hour": IntradayWindow("power_hour", "尾盘30分钟", time(15, 30), "仓位与风控动作"),
@@ -629,6 +633,80 @@ def build_us_intraday_readable_report(
     return "\n".join(report).strip() + "\n"
 
 
+def _dedupe_marker_name(match: IntradayWindowMatch) -> str:
+    return f"us-intraday-sent-{match.now.strftime('%Y%m%d')}-{match.window.key}"
+
+
+def _parse_github_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _github_artifact_marker_exists(
+    *,
+    marker_name: str,
+    lookback_hours: int,
+    repo: Optional[str] = None,
+    token: Optional[str] = None,
+    current_run_id: Optional[str] = None,
+) -> bool:
+    repo = repo or os.getenv("GITHUB_REPOSITORY")
+    token = token or os.getenv("GITHUB_TOKEN")
+    current_run_id = current_run_id or os.getenv("GITHUB_RUN_ID")
+    if not repo or not token:
+        logger.info("[IntradayRadar] GitHub artifact 去重缺少 repo/token，跳过去重检查")
+        return False
+
+    cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(hours=max(1, int(lookback_hours)))
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "daily-stock-analysis-intraday-radar",
+    }
+
+    for page in range(1, 4):
+        params = urlencode({"per_page": 100, "page": page})
+        url = f"https://api.github.com/repos/{repo}/actions/artifacts?{params}"
+        try:
+            request = Request(url, headers=headers)
+            with urlopen(request, timeout=12) as response:
+                import json
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            logger.warning("[IntradayRadar] GitHub artifact 去重查询失败，继续发送: %s", exc)
+            return False
+
+        artifacts = payload.get("artifacts") or []
+        if not artifacts:
+            return False
+        for artifact in artifacts:
+            if artifact.get("name") != marker_name or artifact.get("expired"):
+                continue
+            created_at = _parse_github_datetime(str(artifact.get("created_at") or ""))
+            if created_at and created_at < cutoff:
+                continue
+            workflow_run = artifact.get("workflow_run") or {}
+            run_id = str(workflow_run.get("id") or "")
+            if current_run_id and run_id == str(current_run_id):
+                continue
+            return True
+    return False
+
+
+def _write_dedupe_marker(match: IntradayWindowMatch) -> str:
+    os.makedirs("reports", exist_ok=True)
+    marker_name = _dedupe_marker_name(match)
+    path = os.path.join("reports", marker_name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{marker_name}\n")
+    return path
+
+
 def build_us_intraday_technical_report(
     *,
     config: Any,
@@ -777,6 +855,7 @@ def run_us_intraday_radar(
     fetcher_manager: Any = None,
     notifier: Any = None,
     now: Optional[datetime] = None,
+    dedupe_checker: Optional[Callable[[str, int], bool]] = None,
 ) -> Tuple[bool, str]:
     """Run one US intraday radar cycle.
 
@@ -799,6 +878,23 @@ def run_us_intraday_radar(
         beijing_now = match.now.astimezone(ZoneInfo("Asia/Shanghai"))
         if beijing_now.hour >= 23 or beijing_now.hour < 8:
             message = "[IntradayRadar] 跳过：已关闭北京时间夜间盘中推送"
+            logger.info(message)
+            return True, message
+
+    dedupe_enabled = bool(getattr(config, "us_intraday_dedupe_enabled", True))
+    if send_notification and dedupe_enabled and not force_run:
+        marker_name = _dedupe_marker_name(match)
+        lookback_hours = int(getattr(config, "us_intraday_dedupe_lookback_hours", 24))
+        marker_exists = (
+            dedupe_checker(marker_name, lookback_hours)
+            if dedupe_checker is not None
+            else _github_artifact_marker_exists(
+                marker_name=marker_name,
+                lookback_hours=lookback_hours,
+            )
+        )
+        if marker_exists:
+            message = f"[IntradayRadar] 跳过：{marker_name} 已发送过"
             logger.info(message)
             return True, message
 
@@ -827,4 +923,7 @@ def run_us_intraday_radar(
         from src.notification import NotificationService
         notifier = NotificationService()
     sent = notifier.send(telegram_report)
+    if sent and dedupe_enabled and not force_run:
+        marker_path = _write_dedupe_marker(match)
+        logger.info("[IntradayRadar] 去重 marker 已保存: %s", marker_path)
     return bool(sent), path if sent else "盘中雷达推送失败"

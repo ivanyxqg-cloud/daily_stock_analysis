@@ -2,9 +2,14 @@ name: 美股盘中雷达
 
 on:
   schedule:
+    # Polling fallback. GitHub scheduled runs can be delayed or dropped, so
+    # poll during the US session and let code decide whether a checkpoint is due.
+    - cron: '2-59/5 13-20 * * 1-5' # DST session coverage (ET = UTC-4)
+    - cron: '2-59/5 14-21 * * 1-5' # Standard-time session coverage (ET = UTC-5)
     # DST windows (ET = UTC-4)
     - cron: '25 13 * * 1-5'   # 09:25 ET pre-open
     - cron: '45 13 * * 1-5'   # 09:45 ET open +15m
+    - cron: '0 14 * * 1-5'    # 10:00 ET open +30m
     - cron: '30 14 * * 1-5'   # 10:30 ET open +60m
     - cron: '0 16 * * 1-5'    # 12:00 ET midday
     - cron: '30 19 * * 1-5'   # 15:30 ET power hour
@@ -12,6 +17,7 @@ on:
     # Standard-time windows (ET = UTC-5)
     - cron: '25 14 * * 1-5'
     - cron: '45 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
     - cron: '30 15 * * 1-5'
     - cron: '0 17 * * 1-5'
     - cron: '30 20 * * 1-5'
@@ -28,6 +34,7 @@ on:
           - auto
           - pre_open
           - open_15
+          - open_30
           - open_60
           - midday
           - power_hour
@@ -37,6 +44,10 @@ on:
         required: false
         default: false
         type: boolean
+
+permissions:
+  contents: read
+  actions: read
 
 concurrency:
   group: us-intraday-radar
@@ -85,21 +96,24 @@ jobs:
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || 'zh' }}
           MARKET_REVIEW_REGION: us
           US_INTRADAY_RADAR_ENABLED: ${{ vars.US_INTRADAY_RADAR_ENABLED || secrets.US_INTRADAY_RADAR_ENABLED || 'true' }}
-          US_INTRADAY_WINDOWS: ${{ vars.US_INTRADAY_WINDOWS || secrets.US_INTRADAY_WINDOWS || 'pre_open,open_15,open_60,midday,power_hour,close_15' }}
+          US_INTRADAY_WINDOWS: ${{ vars.US_INTRADAY_WINDOWS || secrets.US_INTRADAY_WINDOWS || 'pre_open,open_15,open_30,open_60,midday,power_hour,close_15' }}
           US_INTRADAY_PUSH_NIGHT: ${{ vars.US_INTRADAY_PUSH_NIGHT || secrets.US_INTRADAY_PUSH_NIGHT || 'true' }}
           US_INTRADAY_ALERT_HOLDING_CHANGE_PCT: ${{ vars.US_INTRADAY_ALERT_HOLDING_CHANGE_PCT || secrets.US_INTRADAY_ALERT_HOLDING_CHANGE_PCT || '2.5' }}
           US_INTRADAY_ALERT_INDEX_CHANGE_PCT: ${{ vars.US_INTRADAY_ALERT_INDEX_CHANGE_PCT || secrets.US_INTRADAY_ALERT_INDEX_CHANGE_PCT || '1.0' }}
           US_INTRADAY_ALERT_VIX_CHANGE_PCT: ${{ vars.US_INTRADAY_ALERT_VIX_CHANGE_PCT || secrets.US_INTRADAY_ALERT_VIX_CHANGE_PCT || '5.0' }}
           US_INTRADAY_OPPORTUNITY_MAX: ${{ vars.US_INTRADAY_OPPORTUNITY_MAX || secrets.US_INTRADAY_OPPORTUNITY_MAX || '5' }}
           US_INTRADAY_REPORT_LANGUAGE: ${{ vars.US_INTRADAY_REPORT_LANGUAGE || secrets.US_INTRADAY_REPORT_LANGUAGE || 'zh' }}
-          US_INTRADAY_WINDOW_TOLERANCE_MINUTES: ${{ vars.US_INTRADAY_WINDOW_TOLERANCE_MINUTES || secrets.US_INTRADAY_WINDOW_TOLERANCE_MINUTES || '12' }}
+          US_INTRADAY_WINDOW_TOLERANCE_MINUTES: ${{ vars.US_INTRADAY_WINDOW_TOLERANCE_MINUTES || secrets.US_INTRADAY_WINDOW_TOLERANCE_MINUTES || '18' }}
           US_INTRADAY_READABLE_REPORT: ${{ vars.US_INTRADAY_READABLE_REPORT || secrets.US_INTRADAY_READABLE_REPORT || 'true' }}
           US_INTRADAY_JARGON_LEVEL: ${{ vars.US_INTRADAY_JARGON_LEVEL || secrets.US_INTRADAY_JARGON_LEVEL || 'explained' }}
           US_INTRADAY_MAX_ACTION_ITEMS: ${{ vars.US_INTRADAY_MAX_ACTION_ITEMS || secrets.US_INTRADAY_MAX_ACTION_ITEMS || '5' }}
           US_INTRADAY_SHOW_TECHNICAL_DETAILS: ${{ vars.US_INTRADAY_SHOW_TECHNICAL_DETAILS || secrets.US_INTRADAY_SHOW_TECHNICAL_DETAILS || 'false' }}
+          US_INTRADAY_DEDUPE_ENABLED: ${{ vars.US_INTRADAY_DEDUPE_ENABLED || secrets.US_INTRADAY_DEDUPE_ENABLED || 'true' }}
+          US_INTRADAY_DEDUPE_LOOKBACK_HOURS: ${{ vars.US_INTRADAY_DEDUPE_LOOKBACK_HOURS || secrets.US_INTRADAY_DEDUPE_LOOKBACK_HOURS || '24' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
           LOG_LEVEL: INFO
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'yfinance,tencent,akshare_sina,efinance,akshare_em' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p reports logs data
           FORCE_RUN_ARG=""
@@ -109,6 +123,28 @@ jobs:
           WINDOW="${{ github.event.inputs.window || 'auto' }}"
           echo "🧭 美股盘中雷达: window=$WINDOW force=${{ github.event.inputs.force_run || 'false' }}"
           python main.py --intraday-radar --intraday-window "$WINDOW" $FORCE_RUN_ARG
+
+      - name: 查找去重标记
+        id: marker
+        if: always()
+        run: |
+          marker_path="$(find reports -maxdepth 1 -type f -name 'us-intraday-sent-*' | head -n 1 || true)"
+          if [ -n "$marker_path" ]; then
+            marker_name="$(basename "$marker_path")"
+            echo "marker_name=$marker_name" >> "$GITHUB_OUTPUT"
+            echo "marker_path=$marker_path" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 上传去重标记
+        uses: actions/upload-artifact@v6
+        if: steps.marker.outputs.found == 'true'
+        with:
+          name: ${{ steps.marker.outputs.marker_name }}
+          path: ${{ steps.marker.outputs.marker_path }}
+          retention-days: 2
 
       - name: 上传盘中雷达报告
         uses: actions/upload-artifact@v6

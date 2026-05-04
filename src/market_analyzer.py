@@ -128,12 +128,9 @@ class MarketAnalyzer:
         self.strategy = get_market_strategy_blueprint(self.region)
 
     def _get_review_language(self) -> str:
-        configured = normalize_report_language(
+        return normalize_report_language(
             getattr(getattr(self, "config", None), "report_language", "zh")
         )
-        if self.region == "us":
-            return "en"
-        return configured
 
     def _get_template_review_language(self) -> str:
         return normalize_report_language(
@@ -143,7 +140,7 @@ class MarketAnalyzer:
     def _get_market_scope_name(self, review_language: str | None = None) -> str:
         review_language = review_language or self._get_review_language()
         if self.region == "us":
-            return "US market"
+            return "US market" if review_language == "en" else "美股市场"
         if self.region == "hk":
             return "Hong Kong market" if review_language == "en" else "港股市场"
         if review_language == "en":
@@ -185,6 +182,33 @@ class MarketAnalyzer:
         return self.profile.prompt_index_hint
 
     def _get_strategy_prompt_block(self) -> str:
+        if self.region == "us" and self._get_review_language() != "en":
+            return """## 策略框架：美股市场状态策略
+聚焦指数趋势、宏观叙事与板块轮动，形成下一交易日风险姿态。
+
+### 策略原则
+- 先看标普500、纳斯达克、道指是否同向，再判断市场风险偏好。
+- 区分指数贝塔行情与 AI、半导体、软件、能源、金融等主题轮动。
+- 复盘结论必须落到进攻/均衡/防守、仓位纪律和失效条件上。
+
+### 分析维度
+- 趋势结构：判断市场处于动量、震荡还是风险收缩阶段。
+  - SPX / Nasdaq / Dow 是否方向一致
+  - VIX 是否同步回落或反向抬升
+  - 关键指数位置是否被收复或跌破
+- 宏观与资金：把利率、美元、信用风险映射为股票风险偏好。
+  - 长端利率和美元走势对成长股估值的影响
+  - HYG / TLT / GLD 等代理资产是否提示风险切换
+  - 龙头集中度是否过高，市场宽度是否不足
+- 板块主线：识别持续主线与脆弱方向。
+  - AI / 半导体 / 软件主线是否延续
+  - 金融、能源、消费、医药是否出现轮动或防御信号
+  - VIX 与大型科技财报是否带来波动风险
+
+### 行动框架
+- 进攻：主要指数共振上行，VIX 回落，成长主线扩散。
+- 均衡：指数分化或 VIX 小幅抬升，控制仓位，只做相对强势。
+- 防守：指数跌破关键位且 VIX 走高，优先控制回撤。"""
         if self.region == "hk" and self._get_review_language() == "en":
             return """## Strategy Blueprint: Hong Kong Market Regime Strategy
 Focus on HSI trend, southbound flow dynamics, and sector rotation to define next-session risk posture.
@@ -243,6 +267,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _get_strategy_markdown_block(self, review_language: str | None = None) -> str:
         review_language = review_language or self._get_review_language()
+        if self.region == "us" and review_language != "en":
+            return """### 六、策略框架
+- **趋势结构**：观察 SPX / Nasdaq / Dow 是否共振，VIX 是否确认风险偏好。
+- **宏观与资金**：跟踪长端利率、美元、黄金、信用风险代理对成长股估值的影响。
+- **板块主线**：聚焦 AI、半导体、软件等主线延续性，同时留意金融、能源、消费、医药轮动。
+"""
         if self.region == "hk" and review_language == "en":
             return """### 6. Strategy Framework
 - **Trend Regime**: Classify the market as momentum, range, or risk-off based on HSI/HSTECH/HSCEI alignment.
@@ -670,7 +700,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             ]
         else:
             lines = [
-                "| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额(亿) |",
+                f"| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额({self._get_turnover_unit_label()}) |",
                 "|------|------|--------|------|------|------|------|-----------|",
             ]
         for idx in overview.indices:

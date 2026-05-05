@@ -65,7 +65,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
                 now=now,
             )
 
-        self.assertEqual(match.skip_reason, "当前不在已配置的盘中提醒窗口")
+        self.assertIn("尚未到第一个盘中提醒窗口", match.skip_reason)
 
     def test_resolves_open_30_window(self):
         now = datetime(2026, 6, 1, 10, 4, tzinfo=ZoneInfo("America/New_York"))
@@ -79,6 +79,66 @@ class USIntradayRadarTestCase(unittest.TestCase):
             )
 
         self.assertEqual(match.window.key, "open_30")
+        self.assertFalse(match.skip_reason)
+
+    def test_auto_catches_up_late_regular_window(self):
+        now = datetime(2026, 6, 1, 10, 22, tzinfo=ZoneInfo("America/New_York"))
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            match = resolve_us_intraday_window(
+                enabled=True,
+                configured_windows="open_15,open_30,open_60",
+                tolerance_minutes=18,
+                catchup_minutes=45,
+                now=now,
+            )
+
+        self.assertEqual(match.window.key, "open_30")
+        self.assertFalse(match.skip_reason)
+
+    def test_auto_uses_next_window_at_boundary(self):
+        now = datetime(2026, 6, 1, 10, 30, tzinfo=ZoneInfo("America/New_York"))
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            match = resolve_us_intraday_window(
+                enabled=True,
+                configured_windows="open_30,open_60",
+                tolerance_minutes=18,
+                catchup_minutes=45,
+                now=now,
+            )
+
+        self.assertEqual(match.window.key, "open_60")
+        self.assertFalse(match.skip_reason)
+
+    def test_auto_skips_after_regular_catchup_expired(self):
+        now = datetime(2026, 6, 1, 10, 46, tzinfo=ZoneInfo("America/New_York"))
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            match = resolve_us_intraday_window(
+                enabled=True,
+                configured_windows="open_30",
+                tolerance_minutes=18,
+                catchup_minutes=45,
+                now=now,
+            )
+
+        self.assertIn("已超过 开盘30分钟 的补发时间", match.skip_reason)
+
+    def test_auto_allows_extended_close_catchup(self):
+        now = datetime(2026, 6, 1, 17, 30, tzinfo=ZoneInfo("America/New_York"))
+
+        with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+            match = resolve_us_intraday_window(
+                enabled=True,
+                configured_windows="close_15",
+                tolerance_minutes=18,
+                catchup_minutes=45,
+                close_catchup_minutes=120,
+                now=now,
+            )
+
+        self.assertEqual(match.window.key, "close_15")
         self.assertFalse(match.skip_reason)
 
     def test_non_trading_day_skips_without_force(self):

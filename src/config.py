@@ -704,6 +704,8 @@ class Config:
     us_intraday_opportunity_max: int = 5
     us_intraday_report_language: str = "zh"
     us_intraday_window_tolerance_minutes: int = 18
+    us_intraday_catchup_minutes: int = 45
+    us_intraday_close_catchup_minutes: int = 120
     us_intraday_poll_interval_minutes: int = 10
     us_intraday_readable_report: bool = True
     us_intraday_jargon_level: str = "explained"
@@ -1453,6 +1455,18 @@ class Config:
                 os.getenv('US_INTRADAY_WINDOW_TOLERANCE_MINUTES'),
                 18,
                 field_name='US_INTRADAY_WINDOW_TOLERANCE_MINUTES',
+                minimum=0,
+            ),
+            us_intraday_catchup_minutes=parse_env_int(
+                os.getenv('US_INTRADAY_CATCHUP_MINUTES'),
+                45,
+                field_name='US_INTRADAY_CATCHUP_MINUTES',
+                minimum=0,
+            ),
+            us_intraday_close_catchup_minutes=parse_env_int(
+                os.getenv('US_INTRADAY_CLOSE_CATCHUP_MINUTES'),
+                120,
+                field_name='US_INTRADAY_CLOSE_CATCHUP_MINUTES',
                 minimum=0,
             ),
             us_intraday_poll_interval_minutes=parse_env_int(

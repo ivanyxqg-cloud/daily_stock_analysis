@@ -105,14 +105,16 @@ def resolve_us_intraday_window(
     enabled: bool,
     configured_windows: Sequence[str] | str | None,
     tolerance_minutes: int,
+    catchup_minutes: Optional[int] = None,
+    close_catchup_minutes: Optional[int] = None,
     force_run: bool = False,
     requested_window: str = "auto",
     now: Optional[datetime] = None,
 ) -> IntradayWindowMatch:
     """Resolve the current US intraday radar window.
 
-    Auto matching intentionally accepts only times at/after a window, so the
-    duplicate DST/standard GitHub schedules cannot fire the next window early.
+    Auto matching is a checkpoint catch-up resolver: it never sends before a
+    window time, but it can still send after GitHub Actions arrives late.
     """
     ny_tz = ZoneInfo("America/New_York")
     current = now or datetime.now(ny_tz)
@@ -159,7 +161,75 @@ def resolve_us_intraday_window(
             )
         return IntradayWindowMatch(window=WINDOW_DEFS[requested], now=current, forced=force_run)
 
-    tolerance = max(0, int(tolerance_minutes))
+    fallback_tolerance = max(0, int(tolerance_minutes))
+    regular_catchup = max(
+        0,
+        int(catchup_minutes if catchup_minutes is not None else fallback_tolerance),
+    )
+    final_catchup = max(
+        0,
+        int(close_catchup_minutes if close_catchup_minutes is not None else regular_catchup),
+    )
+    ordered_windows = sorted(
+        [WINDOW_DEFS[key] for key in allowed],
+        key=lambda item: (item.local_time.hour, item.local_time.minute),
+    )
+    window_targets = [
+        (
+            window,
+            current.replace(
+                hour=window.local_time.hour,
+                minute=window.local_time.minute,
+                second=0,
+                microsecond=0,
+            ),
+        )
+        for window in ordered_windows
+    ]
+
+    first_window, first_target = window_targets[0]
+    if current < first_target:
+        if force_run:
+            fallback_key = allowed[0] if allowed else "open_15"
+            return IntradayWindowMatch(window=WINDOW_DEFS[fallback_key], now=current, forced=True)
+        return IntradayWindowMatch(
+            window=first_window,
+            now=current,
+            skip_reason=(
+                f"尚未到第一个盘中提醒窗口：{first_window.label} "
+                f"{first_target.strftime('%H:%M ET')}"
+            ),
+        )
+
+    latest_expired: Optional[Tuple[IntradayWindow, datetime, datetime]] = None
+    for index in range(len(window_targets) - 1, -1, -1):
+        window, target = window_targets[index]
+        if current < target:
+            continue
+        grace_minutes = final_catchup if window.key == "close_15" else regular_catchup
+        expiry = target + timedelta(minutes=grace_minutes)
+        expires_at_next_window = False
+        if window.key != "close_15" and index + 1 < len(window_targets):
+            _, next_target = window_targets[index + 1]
+            if next_target <= expiry:
+                expiry = next_target
+                expires_at_next_window = True
+        if current < expiry or (current == expiry and not expires_at_next_window):
+            return IntradayWindowMatch(window=window, now=current)
+        if latest_expired is None or target > latest_expired[1]:
+            latest_expired = (window, target, expiry)
+
+    if latest_expired is not None:
+        window, target, expiry = latest_expired
+        return IntradayWindowMatch(
+            window=window,
+            now=current,
+            skip_reason=(
+                f"已超过 {window.label} 的补发时间：目标 "
+                f"{target.strftime('%H:%M ET')}，补发截止 {expiry.strftime('%H:%M ET')}"
+            ),
+        )
+
     for key in allowed:
         window = WINDOW_DEFS[key]
         target = current.replace(
@@ -169,7 +239,7 @@ def resolve_us_intraday_window(
             microsecond=0,
         )
         elapsed_minutes = (current - target).total_seconds() / 60.0
-        if 0 <= elapsed_minutes <= tolerance:
+        if 0 <= elapsed_minutes <= fallback_tolerance:
             return IntradayWindowMatch(window=window, now=current)
 
     if force_run:
@@ -865,6 +935,8 @@ def run_us_intraday_radar(
         enabled=bool(getattr(config, "us_intraday_radar_enabled", False)),
         configured_windows=getattr(config, "us_intraday_windows", []),
         tolerance_minutes=int(getattr(config, "us_intraday_window_tolerance_minutes", 12)),
+        catchup_minutes=int(getattr(config, "us_intraday_catchup_minutes", 45)),
+        close_catchup_minutes=int(getattr(config, "us_intraday_close_catchup_minutes", 120)),
         force_run=force_run,
         requested_window=requested_window,
         now=now,

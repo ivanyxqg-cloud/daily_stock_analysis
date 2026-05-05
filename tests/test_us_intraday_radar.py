@@ -407,6 +407,75 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertEqual(len(notifier.messages), 1)
         self.assertTrue(marker_exists)
 
+    def test_local_mode_uses_local_marker_for_dedupe(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            stock_list=["QQQ", "VIX"],
+            us_intraday_radar_enabled=True,
+            us_intraday_windows=["open_30"],
+            us_intraday_window_tolerance_minutes=18,
+            us_intraday_push_night=True,
+            us_intraday_dedupe_enabled=True,
+            us_intraday_dedupe_lookback_hours=24,
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=5,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
+            us_intraday_show_technical_details=False,
+            bias_threshold=5.0,
+        )
+        fetcher = FakeFetcher({
+            "QQQ": {"name": "QQQ", "price": 100, "change_pct": 0.5},
+            "VIX": {"name": "VIX", "price": 20, "change_pct": 1.0},
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            marker_dir = os.path.join(tmpdir, "markers")
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "US_INTRADAY_LOCAL_MODE": "true",
+                        "US_INTRADAY_LOCAL_MARKER_DIR": marker_dir,
+                    },
+                    clear=False,
+                ):
+                    with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+                        notifier = FakeNotifier()
+                        ok, _ = run_us_intraday_radar(
+                            config=config,
+                            requested_window="open_30",
+                            send_notification=True,
+                            fetcher_manager=fetcher,
+                            notifier=notifier,
+                            now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+                        )
+                        second_notifier = FakeNotifier()
+                        second_ok, second_message = run_us_intraday_radar(
+                            config=config,
+                            requested_window="open_30",
+                            send_notification=True,
+                            fetcher_manager=fetcher,
+                            notifier=second_notifier,
+                            now=datetime(2026, 6, 1, 10, 3, tzinfo=ZoneInfo("America/New_York")),
+                        )
+                local_marker = os.path.join(marker_dir, "us-intraday-sent-20260601-open_30")
+                local_marker_exists = os.path.exists(local_marker)
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertTrue(local_marker_exists)
+        self.assertTrue(second_ok)
+        self.assertIn("已发送过", second_message)
+        self.assertEqual(second_notifier.messages, [])
+
 
 if __name__ == "__main__":
     unittest.main()

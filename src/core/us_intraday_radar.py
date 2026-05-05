@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -707,6 +708,36 @@ def _dedupe_marker_name(match: IntradayWindowMatch) -> str:
     return f"us-intraday-sent-{match.now.strftime('%Y%m%d')}-{match.window.key}"
 
 
+def _local_marker_dir() -> Path:
+    raw_dir = os.getenv(
+        "US_INTRADAY_LOCAL_MARKER_DIR",
+        "~/Library/Application Support/us-intraday-radar/markers",
+    )
+    return Path(raw_dir).expanduser()
+
+
+def _local_dedupe_marker_exists(marker_name: str, lookback_hours: int) -> bool:
+    marker_path = _local_marker_dir() / marker_name
+    if not marker_path.exists():
+        return False
+    cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(hours=max(1, int(lookback_hours)))
+    try:
+        modified = datetime.fromtimestamp(marker_path.stat().st_mtime, tz=ZoneInfo("UTC"))
+    except OSError as exc:
+        logger.warning("[IntradayRadar] 本地去重 marker 读取失败，继续发送: %s", exc)
+        return False
+    return modified >= cutoff
+
+
+def _default_dedupe_marker_exists(marker_name: str, lookback_hours: int) -> bool:
+    if os.getenv("US_INTRADAY_LOCAL_MODE", "").lower() == "true":
+        return _local_dedupe_marker_exists(marker_name, lookback_hours)
+    return _github_artifact_marker_exists(
+        marker_name=marker_name,
+        lookback_hours=lookback_hours,
+    )
+
+
 def _parse_github_datetime(value: str) -> Optional[datetime]:
     if not value:
         return None
@@ -775,6 +806,15 @@ def _write_dedupe_marker(match: IntradayWindowMatch) -> str:
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"{marker_name}\n")
     return path
+
+
+def _write_local_dedupe_marker(match: IntradayWindowMatch) -> str:
+    marker_dir = _local_marker_dir()
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_name = _dedupe_marker_name(match)
+    marker_path = marker_dir / marker_name
+    marker_path.write_text(f"{marker_name}\n", encoding="utf-8")
+    return str(marker_path)
 
 
 def build_us_intraday_technical_report(
@@ -960,10 +1000,7 @@ def run_us_intraday_radar(
         marker_exists = (
             dedupe_checker(marker_name, lookback_hours)
             if dedupe_checker is not None
-            else _github_artifact_marker_exists(
-                marker_name=marker_name,
-                lookback_hours=lookback_hours,
-            )
+            else _default_dedupe_marker_exists(marker_name, lookback_hours)
         )
         if marker_exists:
             message = f"[IntradayRadar] 跳过：{marker_name} 已发送过"
@@ -998,4 +1035,7 @@ def run_us_intraday_radar(
     if sent and dedupe_enabled and not force_run:
         marker_path = _write_dedupe_marker(match)
         logger.info("[IntradayRadar] 去重 marker 已保存: %s", marker_path)
+        if os.getenv("US_INTRADAY_LOCAL_MODE", "").lower() == "true":
+            local_marker_path = _write_local_dedupe_marker(match)
+            logger.info("[IntradayRadar] 本地去重 marker 已保存: %s", local_marker_path)
     return bool(sent), path if sent else "盘中雷达推送失败"

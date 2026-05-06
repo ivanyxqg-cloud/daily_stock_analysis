@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from src.core.us_intraday_radar import (
+    QuoteQuality,
     QuoteSnapshot,
     build_us_commander_decision,
     build_us_commander_report,
@@ -342,6 +343,198 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertNotIn("CALL观察", report)
         self.assertNotIn("到了 203.00，才考虑动作", report)
         self.assertNotIn("走势偏强，继续观察", report)
+
+    def test_low_quality_quote_blocks_sell_and_options_for_any_holding(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["SNDK"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_show_term_explanations=True,
+            us_commander_options_enabled=True,
+            us_commander_option_min_dte=14,
+            us_commander_option_max_dte=45,
+            us_commander_option_max_risk_pct=1.0,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="pre_open",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="pre_open",
+            now=datetime(2026, 6, 1, 9, 25, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "SNDK": QuoteSnapshot(
+                code="SNDK",
+                price=1406.32,
+                change_pct=-4.14,
+                ma20=995.69,
+                low=1400,
+                high=1418.88,
+                quality=QuoteQuality(
+                    level="low",
+                    session="unknown",
+                    is_fresh=False,
+                    is_actionable=False,
+                    warnings=["缺少报价时间，无法确认是不是实时价"],
+                ),
+            )
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("行情校验", report)
+        self.assertIn("SNDK｜结论：数据不一致，先不交易", report)
+        self.assertIn("不减仓、不加仓", report)
+        self.assertIn("不做期权", report)
+        self.assertNotIn("SNDK｜结论：现在减 1/3", report)
+        self.assertNotIn("PUT，行权价参考", report)
+
+    def test_negative_change_without_key_price_confirmation_does_not_reduce_holding(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["SNDK"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_show_term_explanations=True,
+            us_commander_options_enabled=True,
+            us_commander_option_min_dte=14,
+            us_commander_option_max_dte=45,
+            us_commander_option_max_risk_pct=1.0,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="pre_open",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="pre_open",
+            now=datetime(2026, 6, 1, 9, 25, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "SNDK": QuoteSnapshot(
+                code="SNDK",
+                price=1440.25,
+                change_pct=-4.14,
+                ma5=1390,
+                ma10=1280,
+                ma20=995.69,
+                open_price=1430,
+                low=1406.32,
+                high=1455,
+                quality=QuoteQuality(
+                    level="high",
+                    session="premarket",
+                    quote_time=datetime(2026, 6, 1, 9, 24, tzinfo=ZoneInfo("America/New_York")),
+                    is_fresh=True,
+                    is_actionable=True,
+                    price_field="preMarketPrice",
+                    change_pct_field="preMarketChangePercent",
+                ),
+            )
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("SNDK｜结论：先持有，不减仓", report)
+        self.assertIn("不加仓也不减仓", report)
+        self.assertIn("不做 PUT", report)
+        self.assertNotIn("SNDK｜结论：现在减 1/3", report)
+
+    def test_reliable_breakdown_can_still_reduce_holding(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["SNDK"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_show_term_explanations=True,
+            us_commander_options_enabled=True,
+            us_commander_option_min_dte=14,
+            us_commander_option_max_dte=45,
+            us_commander_option_max_risk_pct=1.0,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_30",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_30",
+            now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "SNDK": QuoteSnapshot(
+                code="SNDK",
+                price=930,
+                change_pct=-4.5,
+                ma5=980,
+                ma10=990,
+                ma20=995,
+                open_price=960,
+                low=925,
+                high=980,
+                quality=QuoteQuality(
+                    level="high",
+                    session="regular",
+                    quote_time=datetime(2026, 6, 1, 10, 1, tzinfo=ZoneInfo("America/New_York")),
+                    is_fresh=True,
+                    is_actionable=True,
+                    price_field="regularMarketPrice",
+                    change_pct_field="regularMarketChangePercent",
+                ),
+            )
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("SNDK｜结论：现在减 1/3", report)
+        self.assertIn("2-6周 PUT", report)
+
+    def test_quote_snapshot_quality_requires_fresh_timestamp_and_matching_session(self):
+        now = datetime(2026, 6, 1, 9, 25, tzinfo=ZoneInfo("America/New_York"))
+        stale_fetcher = FakeFetcher({
+            "SNDK": SimpleNamespace(code="SNDK", name="SNDK", price=1406.32, change_pct=-4.14),
+        })
+        fresh_fetcher = FakeFetcher({
+            "AAPL": SimpleNamespace(
+                code="AAPL",
+                name="AAPL",
+                price=200,
+                change_pct=1.0,
+                quote_time=datetime(2026, 6, 1, 9, 23, tzinfo=ZoneInfo("America/New_York")),
+                market_session="premarket",
+                price_field="preMarketPrice",
+                change_pct_field="preMarketChangePercent",
+            ),
+        })
+
+        stale = build_quote_snapshots(["SNDK"], stale_fetcher, now=now)
+        fresh = build_quote_snapshots(["AAPL"], fresh_fetcher, now=now)
+
+        self.assertFalse(stale["SNDK"].quality.is_actionable)
+        self.assertEqual(stale["SNDK"].quality.level, "low")
+        self.assertTrue(fresh["AAPL"].quality.is_actionable)
+        self.assertEqual(fresh["AAPL"].quality.level, "high")
 
     def test_commander_market_temperature_turns_defensive(self):
         config = SimpleNamespace(

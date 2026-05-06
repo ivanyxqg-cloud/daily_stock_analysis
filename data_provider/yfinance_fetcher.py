@@ -21,6 +21,7 @@ from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from tenacity import (
@@ -32,7 +33,7 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
-from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
+from .realtime_types import UnifiedRealtimeQuote, RealtimeSource, safe_float
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 
 # 可选导入本地股票映射补丁，若缺失则使用空字典兜底
@@ -588,16 +589,20 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"[Yfinance] 获取美股指数 {user_code} ({yf_symbol}) 实时行情")
             ticker = yf.Ticker(yf_symbol)
 
+            fast_values: Dict[str, Any] = {}
             try:
                 info = ticker.fast_info
                 if info is None:
                     raise ValueError("fast_info is None")
-                price = getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None)
-                prev_close = getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None)
-                open_price = getattr(info, 'open', None)
-                high = getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None)
-                low = getattr(info, 'dayLow', None) or getattr(info, 'day_low', None)
-                volume = getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None)
+                fast_values = {
+                    "price": getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None),
+                    "prev_close": getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None),
+                    "open_price": getattr(info, 'open', None),
+                    "high": getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None),
+                    "low": getattr(info, 'dayLow', None) or getattr(info, 'day_low', None),
+                    "volume": getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None),
+                    "market_cap": None,
+                }
             except Exception:
                 logger.debug("[Yfinance] fast_info 失败，尝试 history 方法")
                 hist = ticker.history(period='2d')
@@ -606,16 +611,39 @@ class YfinanceFetcher(BaseFetcher):
                     return None
                 today = hist.iloc[-1]
                 prev = hist.iloc[-2] if len(hist) > 1 else today
-                price = float(today['Close'])
-                prev_close = float(prev['Close'])
-                open_price = float(today['Open'])
-                high = float(today['High'])
-                low = float(today['Low'])
-                volume = int(today['Volume'])
+                fast_values = {
+                    "price": float(today['Close']),
+                    "prev_close": float(prev['Close']),
+                    "open_price": float(today['Open']),
+                    "high": float(today['High']),
+                    "low": float(today['Low']),
+                    "volume": int(today['Volume']),
+                    "market_cap": None,
+                }
+
+            try:
+                quote_info = ticker.info or {}
+            except Exception as exc:
+                logger.debug("[Yfinance] ticker.info 获取指数信息失败，仅使用 fast_info/history: %s", exc)
+                quote_info = {}
+
+            selected = self._select_yahoo_quote_fields(
+                info=quote_info,
+                fast_values=fast_values,
+            )
+            price = selected["price"]
+            prev_close = selected["prev_close"]
+            open_price = selected["open_price"]
+            high = selected["high"]
+            low = selected["low"]
+            volume = selected["volume"]
 
             change_amount = None
             change_pct = None
-            if price is not None and prev_close is not None and prev_close > 0:
+            if selected["change_pct"] is not None:
+                change_amount = selected["change_amount"]
+                change_pct = selected["change_pct"]
+            elif price is not None and prev_close is not None and prev_close > 0:
                 change_amount = price - prev_close
                 change_pct = (change_amount / prev_close) * 100
 
@@ -643,12 +671,160 @@ class YfinanceFetcher(BaseFetcher):
                 pb_ratio=None,
                 total_mv=None,
                 circ_mv=None,
+                quote_time=selected["quote_time"],
+                market_session=selected["market_session"],
+                price_field=selected["price_field"],
+                change_pct_field=selected["change_pct_field"],
+                quote_warnings=selected["quote_warnings"],
             )
             logger.info(f"[Yfinance] 获取美股指数 {user_code} 实时行情成功: 价格={price}")
             return quote
         except Exception as e:
             logger.warning(f"[Yfinance] 获取美股指数 {user_code} 实时行情失败: {e}")
             return None
+
+    @staticmethod
+    def _session_now() -> str:
+        """Return the current US equity session from the New York clock."""
+        now = datetime.now(ZoneInfo("America/New_York")).time()
+        if now >= datetime.strptime("04:00", "%H:%M").time() and now < datetime.strptime("09:30", "%H:%M").time():
+            return "premarket"
+        if now >= datetime.strptime("09:30", "%H:%M").time() and now <= datetime.strptime("16:00", "%H:%M").time():
+            return "regular"
+        if now > datetime.strptime("16:00", "%H:%M").time() and now <= datetime.strptime("20:00", "%H:%M").time():
+            return "postmarket"
+        return "closed"
+
+    @staticmethod
+    def _epoch_to_iso(value: Any) -> Optional[str]:
+        if value in (None, "", 0):
+            return None
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp, tz=ZoneInfo("America/New_York")).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _info_value(info: Dict[str, Any], *field_names: str) -> Any:
+        for field_name in field_names:
+            value = info.get(field_name)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _select_yahoo_quote_fields(
+        self,
+        *,
+        info: Dict[str, Any],
+        fast_values: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Pick explicit Yahoo quote fields and keep provenance for quality checks."""
+        current_session = self._session_now()
+        warnings: List[str] = []
+
+        session_specs = {
+            "premarket": {
+                "price": ("preMarketPrice",),
+                "change_pct": ("preMarketChangePercent",),
+                "time": ("preMarketTime",),
+                "previous_close": ("regularMarketPreviousClose", "previousClose"),
+            },
+            "regular": {
+                "price": ("regularMarketPrice", "currentPrice"),
+                "change_pct": ("regularMarketChangePercent",),
+                "time": ("regularMarketTime",),
+                "previous_close": ("regularMarketPreviousClose", "previousClose"),
+            },
+            "postmarket": {
+                "price": ("postMarketPrice",),
+                "change_pct": ("postMarketChangePercent",),
+                "time": ("postMarketTime",),
+                "previous_close": ("regularMarketPreviousClose", "previousClose"),
+            },
+        }
+        candidate_sessions = {
+            "premarket": ["premarket", "regular"],
+            "regular": ["regular"],
+            "postmarket": ["postmarket", "regular"],
+            "closed": ["postmarket", "regular"],
+        }.get(current_session, ["regular"])
+
+        selected_session = "unknown"
+        price = None
+        price_field = ""
+        change_pct = None
+        change_pct_field = ""
+        quote_time = None
+        prev_close = self._info_value(info, "regularMarketPreviousClose", "previousClose")
+
+        for candidate in candidate_sessions:
+            spec = session_specs[candidate]
+            raw_price = self._info_value(info, *spec["price"])
+            parsed_price = safe_float(raw_price)
+            raw_time = self._info_value(info, *spec["time"])
+            if parsed_price is None or raw_time in (None, ""):
+                continue
+            selected_session = candidate
+            price = parsed_price
+            price_field = spec["price"][0]
+            quote_time = self._epoch_to_iso(raw_time)
+            raw_change = self._info_value(info, *spec["change_pct"])
+            change_pct = safe_float(raw_change)
+            change_pct_field = spec["change_pct"][0] if raw_change is not None else ""
+            prev_close = self._info_value(info, *spec["previous_close"]) or prev_close
+            break
+
+        if price is None:
+            raw_price = fast_values.get("price")
+            price = safe_float(raw_price)
+            price_field = "fast_info.lastPrice" if price is not None else ""
+            selected_session = "unknown"
+            warnings.append("Yahoo 未返回明确盘前/盘中/盘后报价时间，已标记为低可信")
+
+        prev_close = safe_float(prev_close if prev_close is not None else fast_values.get("prev_close"))
+        if change_pct is None and price is not None and prev_close and prev_close > 0:
+            change_pct = (price - prev_close) / prev_close * 100
+            change_pct_field = "computed_from_price_and_previous_close"
+
+        open_price = safe_float(
+            self._info_value(info, "regularMarketOpen", "open")
+            if info
+            else fast_values.get("open_price")
+        )
+        high = safe_float(
+            self._info_value(info, "regularMarketDayHigh", "dayHigh")
+            if info
+            else fast_values.get("high")
+        )
+        low = safe_float(
+            self._info_value(info, "regularMarketDayLow", "dayLow")
+            if info
+            else fast_values.get("low")
+        )
+        volume = self._info_value(info, "regularMarketVolume", "volume")
+        volume = volume if volume is not None else fast_values.get("volume")
+        market_cap = self._info_value(info, "marketCap") if info else fast_values.get("market_cap")
+
+        return {
+            "price": price,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "change_amount": (price - prev_close) if price is not None and prev_close else None,
+            "open_price": open_price,
+            "high": high,
+            "low": low,
+            "volume": volume,
+            "market_cap": market_cap,
+            "quote_time": quote_time,
+            "market_session": selected_session,
+            "price_field": price_field,
+            "change_pct_field": change_pct_field,
+            "quote_warnings": warnings,
+        }
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
@@ -686,18 +862,21 @@ class YfinanceFetcher(BaseFetcher):
             ticker = yf.Ticker(symbol)
 
             # 尝试获取 fast_info（更快，但字段较少）
+            fast_values: Dict[str, Any] = {}
             try:
                 info = ticker.fast_info
                 if info is None:
                     raise ValueError("fast_info is None")
 
-                price = getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None)
-                prev_close = getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None)
-                open_price = getattr(info, 'open', None)
-                high = getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None)
-                low = getattr(info, 'dayLow', None) or getattr(info, 'day_low', None)
-                volume = getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None)
-                market_cap = getattr(info, 'marketCap', None) or getattr(info, 'market_cap', None)
+                fast_values = {
+                    "price": getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None),
+                    "prev_close": getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None),
+                    "open_price": getattr(info, 'open', None),
+                    "high": getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None),
+                    "low": getattr(info, 'dayLow', None) or getattr(info, 'day_low', None),
+                    "volume": getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None),
+                    "market_cap": getattr(info, 'marketCap', None) or getattr(info, 'market_cap', None),
+                }
 
             except Exception:
                 # 回退到 history 方法获取最新数据
@@ -710,20 +889,37 @@ class YfinanceFetcher(BaseFetcher):
                 today = hist.iloc[-1]
                 prev = hist.iloc[-2] if len(hist) > 1 else today
 
-                price = float(today['Close'])
-                prev_close = float(prev['Close'])
-                open_price = float(today['Open'])
-                high = float(today['High'])
-                low = float(today['Low'])
-                volume = int(today['Volume'])
-                market_cap = None
+                fast_values = {
+                    "price": float(today['Close']),
+                    "prev_close": float(prev['Close']),
+                    "open_price": float(today['Open']),
+                    "high": float(today['High']),
+                    "low": float(today['Low']),
+                    "volume": int(today['Volume']),
+                    "market_cap": None,
+                }
+
+            try:
+                quote_info = ticker.info or {}
+            except Exception as exc:
+                logger.debug("[Yfinance] ticker.info 获取失败，仅使用 fast_info/history: %s", exc)
+                quote_info = {}
+
+            selected = self._select_yahoo_quote_fields(
+                info=quote_info,
+                fast_values=fast_values,
+            )
+            price = selected["price"]
+            prev_close = selected["prev_close"]
+            open_price = selected["open_price"]
+            high = selected["high"]
+            low = selected["low"]
+            volume = selected["volume"]
+            market_cap = selected["market_cap"]
 
             # 计算涨跌幅
-            change_amount = None
-            change_pct = None
-            if price is not None and prev_close is not None and prev_close > 0:
-                change_amount = price - prev_close
-                change_pct = (change_amount / prev_close) * 100
+            change_amount = selected["change_amount"]
+            change_pct = selected["change_pct"]
 
             # 计算振幅
             amplitude = None
@@ -731,11 +927,8 @@ class YfinanceFetcher(BaseFetcher):
                 amplitude = ((high - low) / prev_close) * 100
 
             # 获取股票名称
-            try:
-                info_name = ticker.info.get('shortName', '') or ticker.info.get('longName', '') or ''
-                name = info_name if is_meaningful_stock_name(info_name, symbol) else STOCK_NAME_MAP.get(symbol, '')
-            except Exception:
-                name = STOCK_NAME_MAP.get(symbol, '')
+            info_name = quote_info.get('shortName', '') or quote_info.get('longName', '') or ''
+            name = info_name if is_meaningful_stock_name(info_name, symbol) else STOCK_NAME_MAP.get(symbol, '')
 
             quote = UnifiedRealtimeQuote(
                 code=symbol,
@@ -757,6 +950,11 @@ class YfinanceFetcher(BaseFetcher):
                 pb_ratio=None,
                 total_mv=market_cap,
                 circ_mv=None,
+                quote_time=selected["quote_time"],
+                market_session=selected["market_session"],
+                price_field=selected["price_field"],
+                change_pct_field=selected["change_pct_field"],
+                quote_warnings=selected["quote_warnings"],
             )
 
             logger.info(f"[Yfinance] 获取美股 {symbol} 实时行情成功: 价格={price}")

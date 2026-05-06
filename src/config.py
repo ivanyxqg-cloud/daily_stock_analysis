@@ -713,6 +713,8 @@ class Config:
     us_intraday_show_technical_details: bool = False
     us_intraday_dedupe_enabled: bool = True
     us_intraday_dedupe_lookback_hours: int = 24
+    us_intraday_require_fresh_quotes: bool = True
+    us_intraday_quote_freshness_minutes: int = 20
     us_commander_enabled: bool = False
     us_commander_mode: str = "swing_intraday"
     us_commander_risk_style: str = "balanced"
@@ -1510,6 +1512,16 @@ class Config:
                 os.getenv('US_INTRADAY_DEDUPE_LOOKBACK_HOURS'),
                 24,
                 field_name='US_INTRADAY_DEDUPE_LOOKBACK_HOURS',
+                minimum=1,
+            ),
+            us_intraday_require_fresh_quotes=os.getenv(
+                'US_INTRADAY_REQUIRE_FRESH_QUOTES',
+                'true',
+            ).lower() == 'true',
+            us_intraday_quote_freshness_minutes=parse_env_int(
+                os.getenv('US_INTRADAY_QUOTE_FRESHNESS_MINUTES'),
+                20,
+                field_name='US_INTRADAY_QUOTE_FRESHNESS_MINUTES',
                 minimum=1,
             ),
             us_commander_enabled=os.getenv('US_COMMANDER_ENABLED', 'false').lower() == 'true',

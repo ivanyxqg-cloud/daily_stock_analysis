@@ -18,7 +18,7 @@ import logging
 import time
 from threading import RLock
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,13 @@ class UnifiedRealtimeQuote:
     change_60d: Optional[float] = None      # 60日涨跌幅(%)
     high_52w: Optional[float] = None        # 52周最高
     low_52w: Optional[float] = None         # 52周最低
+
+    # === 报价元信息（用于判断行情是否足够新鲜、是否可用于交易动作）===
+    quote_time: Optional[Any] = None        # 报价时间（ISO 字符串、datetime 或 epoch 秒）
+    market_session: Optional[str] = None    # premarket / regular / postmarket / closed / unknown
+    price_field: Optional[str] = None       # 价格来自哪个原始字段
+    change_pct_field: Optional[str] = None  # 涨跌幅来自哪个原始字段
+    quote_warnings: Optional[List[str]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（过滤 None 值）"""
@@ -161,7 +168,9 @@ class UnifiedRealtimeQuote:
             'volume_ratio', 'turnover_rate', 'amplitude',
             'open_price', 'high', 'low', 'pre_close',
             'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
-            'change_60d', 'high_52w', 'low_52w'
+            'change_60d', 'high_52w', 'low_52w',
+            'quote_time', 'market_session', 'price_field',
+            'change_pct_field', 'quote_warnings'
         ]
         for f in optional_fields:
             val = getattr(self, f, None)

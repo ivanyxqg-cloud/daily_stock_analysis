@@ -76,6 +76,18 @@ class IntradayWindowMatch:
 
 
 @dataclass
+class QuoteQuality:
+    level: str = "high"
+    session: str = "regular"
+    quote_time: Optional[datetime] = None
+    is_fresh: bool = True
+    is_actionable: bool = True
+    price_field: str = ""
+    change_pct_field: str = ""
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class QuoteSnapshot:
     code: str
     name: str = ""
@@ -91,6 +103,7 @@ class QuoteSnapshot:
     ma10: Optional[float] = None
     ma20: Optional[float] = None
     bias_pct: Optional[float] = None
+    quality: QuoteQuality = field(default_factory=QuoteQuality)
 
 
 @dataclass
@@ -121,6 +134,9 @@ class CommanderSignal:
     option_instruction: str = "不做期权"
     option_plan: str = ""
     change_note: str = "新信号"
+    quote_quality_level: str = "高"
+    quote_actionable: bool = True
+    quote_warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -362,6 +378,161 @@ def _format_source(value: Any) -> str:
     return getattr(value, "value", str(value))
 
 
+def _parse_quote_time(value: Any) -> Optional[datetime]:
+    if value in (None, "", 0):
+        return None
+    ny_tz = ZoneInfo("America/New_York")
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(float(value), tz=ny_tz)
+        except (OSError, OverflowError, ValueError):
+            return None
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.isdigit():
+            try:
+                parsed = datetime.fromtimestamp(float(text), tz=ny_tz)
+            except (OSError, OverflowError, ValueError):
+                return None
+        else:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=ny_tz)
+    return parsed.astimezone(ny_tz)
+
+
+def _expected_quote_session(now: datetime) -> str:
+    ny_now = now.astimezone(ZoneInfo("America/New_York"))
+    current = ny_now.time()
+    if time(4, 0) <= current < time(9, 30):
+        return "premarket"
+    if time(9, 30) <= current <= time(16, 0):
+        return "regular"
+    if time(16, 0) < current <= time(20, 0):
+        return "postmarket"
+    return "closed"
+
+
+def _quality_label(level: str) -> str:
+    mapping = {"high": "高", "medium": "中", "low": "低"}
+    return mapping.get(str(level or "").lower(), "低")
+
+
+def _dedupe_text(values: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _assess_quote_quality(
+    *,
+    quote: Any,
+    source: str,
+    now: datetime,
+    freshness_minutes: int,
+    require_fresh_quotes: bool,
+) -> QuoteQuality:
+    session = str(
+        _quote_field(quote, "market_session")
+        or _quote_field(quote, "session")
+        or "unknown"
+    ).strip().lower()
+    quote_time = _parse_quote_time(
+        _quote_field(quote, "quote_time")
+        or _quote_field(quote, "regular_market_time")
+        or _quote_field(quote, "pre_market_time")
+        or _quote_field(quote, "post_market_time")
+        or _quote_field(quote, "timestamp")
+        or _quote_field(quote, "time")
+    )
+    price_field = str(_quote_field(quote, "price_field") or "").strip()
+    change_pct_field = str(_quote_field(quote, "change_pct_field") or "").strip()
+    raw_warnings = _quote_field(quote, "quote_warnings") or []
+    warnings = [str(item) for item in raw_warnings if str(item).strip()] if isinstance(raw_warnings, list) else []
+
+    expected = _expected_quote_session(now)
+    freshness_minutes = max(1, int(freshness_minutes))
+    is_fresh = False
+    if quote_time is not None:
+        delta_minutes = abs((now.astimezone(ZoneInfo("America/New_York")) - quote_time).total_seconds()) / 60.0
+        is_fresh = delta_minutes <= freshness_minutes
+        if not is_fresh:
+            warnings.append(f"报价时间超过 {freshness_minutes} 分钟，可能不是最新行情")
+    else:
+        warnings.append("缺少报价时间，无法确认是不是实时价")
+
+    session_actionable = False
+    if expected == "premarket":
+        session_actionable = session == "premarket"
+        if not session_actionable:
+            warnings.append("当前是盘前，但行情源没有明确盘前报价")
+    elif expected == "regular":
+        session_actionable = session == "regular"
+        if not session_actionable:
+            warnings.append("当前是常规盘中，但行情源没有明确盘中报价")
+    elif expected == "postmarket":
+        session_actionable = session == "postmarket"
+        if not session_actionable:
+            warnings.append("当前是盘后，但行情源没有明确盘后报价")
+    else:
+        warnings.append("当前不在美股可交易时段，行情只用于观察")
+
+    if not price_field:
+        warnings.append("缺少原始价格字段来源")
+
+    is_actionable = bool(is_fresh and session_actionable)
+    if not require_fresh_quotes:
+        is_actionable = True
+        is_fresh = True if quote_time is None else is_fresh
+
+    if is_actionable:
+        level = "high"
+    elif quote_time is not None and is_fresh:
+        level = "medium"
+    else:
+        level = "low"
+
+    return QuoteQuality(
+        level=level,
+        session=session,
+        quote_time=quote_time,
+        is_fresh=is_fresh,
+        is_actionable=is_actionable,
+        price_field=price_field,
+        change_pct_field=change_pct_field,
+        warnings=_dedupe_text(warnings),
+    )
+
+
+def _quote_quality_text(snapshot: QuoteSnapshot) -> str:
+    quality = snapshot.quality
+    pieces = [f"行情可信度：{_quality_label(quality.level)}"]
+    if quality.session:
+        pieces.append(f"阶段 {quality.session}")
+    if quality.quote_time:
+        pieces.append(f"时间 {quality.quote_time.strftime('%H:%M ET')}")
+    if quality.warnings:
+        pieces.append("；".join(quality.warnings[:2]))
+    return "，".join(pieces)
+
+
+def _quote_is_actionable(snapshot: QuoteSnapshot) -> bool:
+    return bool(snapshot.quality.is_actionable)
+
+
 def _dedupe_codes(codes: Iterable[str]) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -413,8 +584,20 @@ def _augment_ma(snapshot: QuoteSnapshot, closes: List[float]) -> None:
         snapshot.bias_pct = (snapshot.price - snapshot.ma5) / snapshot.ma5 * 100
 
 
-def build_quote_snapshots(codes: Sequence[str], fetcher_manager: Any) -> Dict[str, QuoteSnapshot]:
+def build_quote_snapshots(
+    codes: Sequence[str],
+    fetcher_manager: Any,
+    *,
+    now: Optional[datetime] = None,
+    freshness_minutes: int = 20,
+    require_fresh_quotes: bool = True,
+) -> Dict[str, QuoteSnapshot]:
     snapshots: Dict[str, QuoteSnapshot] = {}
+    quality_now = now or datetime.now(ZoneInfo("America/New_York"))
+    if quality_now.tzinfo is None:
+        quality_now = quality_now.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        quality_now = quality_now.astimezone(ZoneInfo("America/New_York"))
     for code in _dedupe_codes(codes):
         try:
             quote = fetcher_manager.get_realtime_quote(code, log_final_failure=False)
@@ -439,6 +622,13 @@ def build_quote_snapshots(codes: Sequence[str], fetcher_manager: Any) -> Dict[st
             pre_close=_as_float(_quote_field(quote, "pre_close")),
             volume_ratio=_as_float(_quote_field(quote, "volume_ratio")),
             source=_format_source(_quote_field(quote, "source")),
+            quality=_assess_quote_quality(
+                quote=quote,
+                source=_format_source(_quote_field(quote, "source")),
+                now=quality_now,
+                freshness_minutes=freshness_minutes,
+                require_fresh_quotes=require_fresh_quotes,
+            ),
         )
         _augment_ma(snapshot, _daily_closes(fetcher_manager, code))
         snapshots[code] = snapshot
@@ -446,11 +636,13 @@ def build_quote_snapshots(codes: Sequence[str], fetcher_manager: Any) -> Dict[st
 
 
 def _action_for_snapshot(snapshot: QuoteSnapshot, *, holding_threshold: float, bias_threshold: float) -> str:
+    if not _quote_is_actionable(snapshot):
+        return "行情可信度低，先观察不交易"
     change = snapshot.change_pct
     price = snapshot.price
     if price and snapshot.ma20 and price < snapshot.ma20:
         return "跌破MA20，优先防守/减仓观察"
-    if change is not None and change <= -abs(holding_threshold):
+    if change is not None and change <= -abs(holding_threshold) and _holding_weakness_confirmed(snapshot):
         return "盘中明显转弱，检查仓位和止损线"
     if change is not None and change >= abs(holding_threshold):
         if snapshot.bias_pct is not None and snapshot.bias_pct > bias_threshold:
@@ -462,11 +654,13 @@ def _action_for_snapshot(snapshot: QuoteSnapshot, *, holding_threshold: float, b
 
 
 def _plain_action_for_snapshot(snapshot: QuoteSnapshot, *, holding_threshold: float, bias_threshold: float) -> str:
+    if not _quote_is_actionable(snapshot):
+        return "行情不够可信，先不买不卖"
     change = snapshot.change_pct
     price = snapshot.price
     if price and snapshot.ma20 and price < snapshot.ma20:
         return "先防守，别加仓"
-    if change is not None and change <= -abs(holding_threshold):
+    if change is not None and change <= -abs(holding_threshold) and _holding_weakness_confirmed(snapshot):
         return "今天走弱，检查仓位和止损线"
     if change is not None and change >= abs(holding_threshold):
         if snapshot.bias_pct is not None and snapshot.bias_pct > bias_threshold:
@@ -487,13 +681,15 @@ def _plain_risk_reason(
     vix_threshold: float,
     bias_threshold: float,
 ) -> Optional[str]:
+    if not _quote_is_actionable(snapshot):
+        return "行情可信度低，先等券商价格或下一次可靠报价确认"
     change = snapshot.change_pct
     price = snapshot.price
     is_holding = code in holding_codes
 
     if is_holding and price and snapshot.ma20 and price < snapshot.ma20:
         return "跌破 MA20（20日均线，近期重要防线）"
-    if is_holding and change is not None and change <= -abs(holding_threshold):
+    if is_holding and change is not None and change <= -abs(holding_threshold) and _holding_weakness_confirmed(snapshot):
         return f"今天走弱 {_format_pct(change)}"
     if is_holding and change is not None and change >= abs(holding_threshold):
         if snapshot.bias_pct is not None and snapshot.bias_pct > bias_threshold:
@@ -531,12 +727,16 @@ def _risk_reason(
     vix_threshold: float,
     bias_threshold: float,
 ) -> Optional[str]:
+    if not _quote_is_actionable(snapshot):
+        return "行情可信度低"
     change = snapshot.change_pct
     if code == "VIX" and change is not None and abs(change) >= vix_threshold:
         return f"VIX 异动 {_format_pct(change)}"
     if code in {"SPY", "QQQ", "SMH", "SPX", "NASDAQ"} and change is not None and abs(change) >= index_threshold:
         return f"指数/主线波动 {_format_pct(change)}"
-    if code in holding_codes and change is not None and abs(change) >= holding_threshold:
+    if code in holding_codes and change is not None and abs(change) >= holding_threshold and (
+        change > 0 or _holding_weakness_confirmed(snapshot)
+    ):
         return f"持仓盘中波动 {_format_pct(change)}"
     if snapshot.price and snapshot.ma20 and snapshot.price < snapshot.ma20:
         return "跌破 MA20"
@@ -619,6 +819,22 @@ def _stop_price(snapshot: QuoteSnapshot) -> Optional[float]:
     if snapshot.price:
         return snapshot.price * 0.97
     return None
+
+
+def _holding_weakness_confirmed(snapshot: QuoteSnapshot) -> bool:
+    """Require price confirmation before turning a negative change into a sell action."""
+    price = snapshot.price
+    if price is None:
+        return False
+    if snapshot.ma20 and price < snapshot.ma20:
+        return True
+    if snapshot.ma5 and price < snapshot.ma5:
+        return True
+    if snapshot.open_price and price < snapshot.open_price:
+        return True
+    if snapshot.pre_close and price < snapshot.pre_close and snapshot.low and price <= snapshot.low * 1.01:
+        return True
+    return False
 
 
 def _risk_reward_text(snapshot: QuoteSnapshot) -> str:
@@ -764,6 +980,18 @@ def _direct_command_for_signal(signal: CommanderSignal, config: Any) -> Commande
     if evidence:
         why = f"{why} 依据：{evidence}。"
 
+    if not signal.quote_actionable:
+        return CommanderCommand(
+            conclusion="结论：数据不一致，先不交易",
+            stock=(
+                f"不减仓、不加仓；等券商实时价或下一次可靠报价确认。"
+                f"关键价先记 {trigger}，但现在不按它行动。"
+            ),
+            option="不做期权；行情不可信时，CALL/PUT 都容易建立在错误价格上。",
+            cancel=f"行情可信度恢复前，取消所有买/卖/期权动作；{signal.quote_warning}",
+            why=why,
+        )
+
     if signal.category == "market":
         if signal.action == "风险优先处理":
             return CommanderCommand(
@@ -833,6 +1061,14 @@ def _direct_command_for_signal(signal: CommanderSignal, config: Any) -> Commande
             cancel=f"跌破 {defense}，减 1/3。",
             why=why,
         )
+    if signal.status == "跌幅未被关键价确认":
+        return CommanderCommand(
+            conclusion="结论：先持有，不减仓",
+            stock=f"不加仓也不减仓；只有跌破 {defense} 才考虑减 1/3。",
+            option="不做 PUT；只是跌幅不好看，还没确认破位。",
+            cancel=f"重新站回 {trigger}，风险提示解除；跌破 {defense} 再处理。",
+            why=why,
+        )
     if signal.action == "继续持有":
         return CommanderCommand(
             conclusion="结论：持有，不加仓",
@@ -851,6 +1087,8 @@ def _direct_command_for_signal(signal: CommanderSignal, config: Any) -> Commande
 
 
 def _is_immediate_action_signal(signal: CommanderSignal) -> bool:
+    if not signal.quote_actionable:
+        return False
     if signal.category == "market":
         return signal.action == "风险优先处理"
     if signal.category == "holding":
@@ -908,6 +1146,8 @@ def _market_temperature(snapshots: Dict[str, QuoteSnapshot]) -> MarketTemperatur
         snapshot = snapshots.get(code)
         if not snapshot or snapshot.change_pct is None:
             return
+        if not _quote_is_actionable(snapshot):
+            return
         direction = 1 if positive_when_up else -1
         score += snapshot.change_pct * weight * direction
         if abs(snapshot.change_pct) >= 0.3:
@@ -963,6 +1203,9 @@ def _signal_dict(signal: CommanderSignal) -> Dict[str, Any]:
         "stock_instruction": signal.stock_instruction,
         "option_instruction": signal.option_instruction,
         "option_plan": signal.option_plan,
+        "quote_quality_level": signal.quote_quality_level,
+        "quote_actionable": signal.quote_actionable,
+        "quote_warning": signal.quote_warning,
     }
 
 
@@ -1058,6 +1301,40 @@ def _holding_commander_signal(
             stock_instruction="不买/不卖：数据不足，先不动作",
             option_instruction="不做期权",
             option_plan="没有可靠价格时不碰期权。",
+            quote_quality_level="低",
+            quote_actionable=False,
+            quote_warning="当前拿不到可用行情",
+        )
+
+    if not _quote_is_actionable(snapshot):
+        trigger = _resistance_price(snapshot)
+        defense = _stop_price(snapshot) or _support_price(snapshot)
+        warning = _quote_quality_text(snapshot)
+        return CommanderSignal(
+            code=code,
+            category="holding",
+            priority=3,
+            score=35,
+            action="继续持有",
+            status="行情未确认",
+            trigger_line=_line_or_na(trigger),
+            defense_line=_line_or_na(defense),
+            target_line=_line_or_na(trigger),
+            risk_reward="N/A",
+            evidence=[
+                warning,
+                f"现价 {_format_price(snapshot.price)}",
+                f"涨跌 {_format_pct(snapshot.change_pct)}",
+            ],
+            confidence=0.25,
+            plain_explanation="当前免费行情源不够可靠，先不按这个价格买卖，等开盘价或券商实时价确认。",
+            learning_note="行情可信度：报价要同时有价格、时间和交易阶段，才适合拿来做动作。",
+            stock_instruction="不买/不卖：等行情确认",
+            option_instruction="不做期权",
+            option_plan="不做期权：行情不可信时，CALL/PUT 都容易建立在错误价格上。",
+            quote_quality_level=_quality_label(snapshot.quality.level),
+            quote_actionable=False,
+            quote_warning=warning,
         )
 
     multiplier = _risk_style_multiplier(config)
@@ -1097,7 +1374,7 @@ def _holding_commander_signal(
             reason="价格跌破近一个月防线，先保护仓位。",
         )
         priority = 0
-    elif change <= -abs(holding_threshold):
+    elif change <= -abs(holding_threshold) and _holding_weakness_confirmed(snapshot):
         action = "减仓观察"
         status = "盘中明显走弱"
         score = 84
@@ -1116,6 +1393,18 @@ def _holding_commander_signal(
             reason="盘中转弱，若继续跌破防守价，可以用小额 PUT 做保护。",
         )
         priority = 0
+    elif change <= -abs(holding_threshold):
+        action = "继续持有"
+        status = "跌幅未被关键价确认"
+        score = 52
+        trigger = resistance
+        defense = support or stop
+        plain = "只看到跌幅还不够，价格没有确认跌破关键防线前，不直接减仓。"
+        note = "确认破位：不是看到跌幅就卖，而是价格真的跌破关键防线才处理。"
+        stock_instruction = "持有不加：等关键价确认"
+        option_instruction = "不做期权"
+        option_plan = "不做期权：跌幅没有关键价确认，PUT 容易做在假信号上。"
+        priority = 2
     elif snapshot.bias_pct is not None and snapshot.bias_pct > bias_threshold:
         action = "禁止追高"
         status = "短线涨太快"
@@ -1194,6 +1483,9 @@ def _holding_commander_signal(
         stock_instruction=stock_instruction,
         option_instruction=option_instruction,
         option_plan=option_plan,
+        quote_quality_level=_quality_label(snapshot.quality.level),
+        quote_actionable=snapshot.quality.is_actionable,
+        quote_warning=_quote_quality_text(snapshot),
     )
 
 
@@ -1208,7 +1500,7 @@ def _market_commander_signals(
     signals: List[CommanderSignal] = []
 
     vix = snapshots.get("VIX")
-    if vix and vix.change_pct is not None and abs(vix.change_pct) >= vix_threshold:
+    if vix and _quote_is_actionable(vix) and vix.change_pct is not None and abs(vix.change_pct) >= vix_threshold:
         action = "风险优先处理" if vix.change_pct > 0 else "继续持有"
         signals.append(CommanderSignal(
             code="VIX",
@@ -1237,6 +1529,8 @@ def _market_commander_signals(
     for code, label in (("QQQ", "科技主线"), ("SMH", "半导体主线"), ("SPY", "大盘")):
         snapshot = snapshots.get(code)
         if not snapshot or snapshot.change_pct is None or abs(snapshot.change_pct) < index_threshold:
+            continue
+        if not _quote_is_actionable(snapshot):
             continue
         weaker = snapshot.change_pct < 0
         signals.append(CommanderSignal(
@@ -1272,6 +1566,8 @@ def _opportunity_commander_signal(
     market: MarketTemperature,
 ) -> Optional[CommanderSignal]:
     if snapshot.price is None:
+        return None
+    if not _quote_is_actionable(snapshot):
         return None
     bias_threshold = float(getattr(config, "bias_threshold", 5.0)) * _risk_style_multiplier(config)
     raw_score = _opportunity_score(snapshot, bias_threshold=bias_threshold)
@@ -1342,6 +1638,9 @@ def _opportunity_commander_signal(
         stock_instruction=stock_instruction,
         option_instruction=option_instruction,
         option_plan=option_plan,
+        quote_quality_level=_quality_label(snapshot.quality.level),
+        quote_actionable=snapshot.quality.is_actionable,
+        quote_warning=_quote_quality_text(snapshot),
     )
 
 
@@ -1407,7 +1706,8 @@ def _commander_signal_line(
     command = _direct_command_for_signal(signal, config)
     if compact:
         return (
-            f"- **{signal.code}**：{command.conclusion}｜{command.stock}｜"
+            f"- **{signal.code}｜{command.conclusion}**：股票：{command.stock}｜"
+            f"期权：{command.option}｜"
             f"取消：{command.cancel}｜{signal.change_note}"
         )
 
@@ -1429,6 +1729,9 @@ def _commander_signal_line(
 
 
 def _commander_summary(decision: CommanderDecision) -> str:
+    data_hits = [item.code for item in decision.holding_signals if not item.quote_actionable]
+    if data_hits:
+        return f"今天主策略：先校验行情。{'、'.join(data_hits[:3])} 的数据不够可靠，先不买不卖，等券商价或下一次可靠报价确认。"
     risk_hits = [item.code for item in decision.action_signals if item.action in {"风险优先处理", "减仓观察"}]
     opportunity_hits = [
         item.code for item in decision.opportunity_signals
@@ -1506,6 +1809,18 @@ def _format_us_commander_report(
         _commander_summary(decision),
         f"- 市场温度：{decision.market.stance} {decision.market.score}/100。{decision.market.summary}",
     ]
+    low_quality_lines = [
+        f"- **{signal.code}**：{signal.quote_warning}"
+        for signal in decision.holding_signals
+        if not signal.quote_actionable
+    ]
+    if low_quality_lines:
+        report.extend([
+            "",
+            "## 行情校验",
+            "以下标的行情可信度不足，本次只观察，不给买/卖/期权动作：",
+            *low_quality_lines[:5],
+        ])
     if commander_note:
         report.extend(["", "## 指挥官补充", commander_note.strip()])
     report.extend([
@@ -1596,13 +1911,16 @@ def _build_commander_llm_note(
             "score": item.score,
             "trigger": item.trigger_line,
             "defense": item.defense_line,
+            "quote_actionable": item.quote_actionable,
+            "quote_warning": item.quote_warning,
             "evidence": item.evidence[:3],
         }
         for item in decision.action_signals[:5]
     ]
     prompt = (
         "你是美股盘中投资指挥助手。请用中文给出不超过120字的补充判断，"
-        "只基于给定信号，不得编造新闻或价格。格式：现在最重要的是...；如果...就...；否则...\n"
+        "只基于给定信号，不得编造新闻或价格。行情不可信时不得给买卖或期权动作。"
+        "格式：现在最重要的是...；如果...就...；否则...\n"
         f"窗口：{match.window.label}\n"
         f"市场：{decision.market.stance} {decision.market.score}/100 {decision.market.summary}\n"
         f"信号：{json.dumps(signals, ensure_ascii=False)}"
@@ -1611,7 +1929,7 @@ def _build_commander_llm_note(
         response = litellm.completion(
             model=model,
             messages=[
-                {"role": "system", "content": "你只输出中文短句，不输出 JSON，不给无条件买卖指令。"},
+                {"role": "system", "content": "你只输出中文短句，不输出 JSON，不给无条件买卖指令，不能覆盖规则层风控拦截。"},
                 {"role": "user", "content": prompt},
             ],
             timeout=20,
@@ -1628,6 +1946,8 @@ def _build_commander_llm_note(
 
 def _market_mood_line(code: str, snapshot: QuoteSnapshot) -> str:
     label = PLAIN_MARKET_LABELS.get(code, code)
+    if not _quote_is_actionable(snapshot):
+        return f"- {label}：行情可信度{_quality_label(snapshot.quality.level)}，只观察不下结论。{_quote_quality_text(snapshot)}"
     change = snapshot.change_pct
     if change is None:
         return f"- {label}：暂无清晰变化"
@@ -1943,6 +2263,17 @@ def _write_local_dedupe_marker(match: IntradayWindowMatch) -> str:
     return str(marker_path)
 
 
+def _quote_audit_line(snapshot: QuoteSnapshot) -> str:
+    quality = snapshot.quality
+    quote_time = quality.quote_time.strftime("%Y-%m-%d %H:%M ET") if quality.quote_time else "N/A"
+    warnings = "；".join(quality.warnings[:3]) if quality.warnings else "无"
+    return (
+        f"| {snapshot.code} | {_format_price(snapshot.price)} | {_format_pct(snapshot.change_pct)} | "
+        f"{_quality_label(quality.level)} | {quality.session or 'unknown'} | {quote_time} | "
+        f"{quality.price_field or 'N/A'} | {quality.change_pct_field or 'N/A'} | {warnings} |"
+    )
+
+
 def build_us_intraday_technical_report(
     *,
     config: Any,
@@ -1968,7 +2299,10 @@ def build_us_intraday_technical_report(
             bias_threshold=bias_threshold,
         )
         if reason:
-            risk_lines.append(f"- **{code}**：{reason}，现价 {_format_price(snapshot.price)}，涨跌 {_format_pct(snapshot.change_pct)}")
+            risk_lines.append(
+                f"- **{code}**：{reason}，现价 {_format_price(snapshot.price)}，"
+                f"涨跌 {_format_pct(snapshot.change_pct)}，{_quote_quality_text(snapshot)}"
+            )
 
     if not risk_lines:
         risk_lines.append("- 暂无必须立刻处理的异常；按计划观察，不追高。")
@@ -1977,7 +2311,10 @@ def build_us_intraday_technical_report(
     for code in DEFAULT_RISK_PROXY_ORDER:
         snapshot = snapshots.get(code)
         if snapshot:
-            market_lines.append(f"- **{code}**：{_format_pct(snapshot.change_pct)} | {_format_price(snapshot.price)}")
+            market_lines.append(
+                f"- **{code}**：{_format_pct(snapshot.change_pct)} | "
+                f"{_format_price(snapshot.price)} | 可信度 {_quality_label(snapshot.quality.level)}"
+            )
 
     holding_lines = []
     for code in sorted(holding_codes):
@@ -1992,7 +2329,8 @@ def build_us_intraday_technical_report(
         )
         holding_lines.append(
             f"- **{code}**：{action} | 涨跌 {_format_pct(snapshot.change_pct)} | "
-            f"现价 {_format_price(snapshot.price)} | MA20 {_format_price(snapshot.ma20)}"
+            f"现价 {_format_price(snapshot.price)} | MA20 {_format_price(snapshot.ma20)} | "
+            f"可信度 {_quality_label(snapshot.quality.level)}"
         )
 
     opportunity_candidates = [
@@ -2018,6 +2356,12 @@ def build_us_intraday_technical_report(
     if not opportunity_lines:
         opportunity_lines.append("- 暂无高质量新增机会，保持观察池即可。")
 
+    audit_lines = [
+        "| 标的 | 价格 | 涨跌 | 可信度 | 阶段 | 报价时间 | 价格字段 | 涨跌字段 | 警告 |",
+        "| --- | ---: | ---: | --- | --- | --- | --- | --- | --- |",
+    ]
+    audit_lines.extend(_quote_audit_line(snapshot) for snapshot in snapshots.values())
+
     forced_note = " | 手动/强制运行" if match.forced else ""
     now_text = match.now.strftime("%Y-%m-%d %H:%M ET")
     report = [
@@ -2037,6 +2381,9 @@ def build_us_intraday_technical_report(
         "",
         "## 机会池",
         *opportunity_lines,
+        "",
+        "## 行情审计",
+        *audit_lines,
         "",
         "## 当前指导",
         f"- **{match.window.label}**：{match.window.focus}。若信号没有触发，按原仓位计划执行；若触发风险，先处理风险再看机会。",
@@ -2164,7 +2511,13 @@ def run_us_intraday_radar(
     opportunity_pool = [code for code in stock_codes if code not in set(holding_codes) and code not in US_RISK_PROXIES]
     codes = _dedupe_codes(holding_codes + risk_codes + opportunity_pool)
 
-    snapshots = build_quote_snapshots(codes, fetcher_manager)
+    snapshots = build_quote_snapshots(
+        codes,
+        fetcher_manager,
+        now=match.now,
+        freshness_minutes=int(getattr(config, "us_intraday_quote_freshness_minutes", 20)),
+        require_fresh_quotes=bool(getattr(config, "us_intraday_require_fresh_quotes", True)),
+    )
     technical_report = build_us_intraday_technical_report(config=config, match=match, snapshots=snapshots)
     commander_decision: Optional[CommanderDecision] = None
     if bool(getattr(config, "us_commander_enabled", False)):

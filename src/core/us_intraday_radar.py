@@ -123,6 +123,15 @@ class CommanderSignal:
     change_note: str = "新信号"
 
 
+@dataclass(frozen=True)
+class CommanderCommand:
+    conclusion: str
+    stock: str
+    option: str
+    cancel: str
+    why: str
+
+
 @dataclass
 class CommanderDecision:
     market: MarketTemperature
@@ -706,6 +715,152 @@ def _looks_like_price_line(value: str) -> bool:
     return True
 
 
+def _price_line_value(value: str) -> Optional[float]:
+    text = str(value or "").strip().replace(",", "")
+    if not text or text == "N/A" or "%" in text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _risk_reward_value(value: str) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text or text == "N/A" or ":" not in text:
+        return None
+    try:
+        return float(text.split(":", 1)[0])
+    except ValueError:
+        return None
+
+
+def _strike_reference_text(value: Optional[float]) -> str:
+    if value is None:
+        return "关键价"
+    if value >= 100:
+        return f"{round(value):.0f}"
+    if value >= 20:
+        return f"{value:.0f}"
+    return f"{value:.1f}"
+
+
+def _direct_position_size(signal: CommanderSignal) -> str:
+    rr = _risk_reward_value(signal.risk_reward)
+    if rr is not None and rr > 1.5 and signal.score >= 72:
+        return "1/3"
+    return "1/4"
+
+
+def _direct_command_for_signal(signal: CommanderSignal, config: Any) -> CommanderCommand:
+    trigger = signal.trigger_line
+    defense = signal.defense_line
+    trigger_value = _price_line_value(trigger)
+    defense_value = _price_line_value(defense)
+    rr = _risk_reward_value(signal.risk_reward)
+    window = _option_window_text(config)
+    evidence = "；".join(signal.evidence[:2])
+    why = f"{signal.status}。{signal.plain_explanation}"
+    if evidence:
+        why = f"{why} 依据：{evidence}。"
+
+    if signal.category == "market":
+        if signal.action == "风险优先处理":
+            return CommanderCommand(
+                conclusion="结论：主线转弱，今天先防守",
+                stock="相关个股不加仓；已经跌破防守价的，先减 1/3。",
+                option=f"不单独追 ETF 期权；只有你的持仓同步破位，才看 {window} PUT 保护。",
+                cancel="主线重新转强前，不做新的进攻动作。",
+                why=why,
+            )
+        return CommanderCommand(
+            conclusion="结论：主线支持持有，但别追",
+            stock="已有仓继续按防守线拿；不要只因为指数强就加仓。",
+            option=f"不急做期权；个股站稳自己的触发价后，才看 {window} CALL。",
+            cancel="如果主线转弱，所有买入想法降级。",
+            why=why,
+        )
+
+    if signal.category == "opportunity":
+        if signal.action == "禁止追高":
+            return CommanderCommand(
+                conclusion="结论：现在不买，涨太快",
+                stock=f"不追；等回到 {trigger} 附近再重新评估。",
+                option="不做 CALL；涨太快时 CALL 容易买在情绪最热的位置。",
+                cancel=f"跌破 {defense}，这条机会先取消。",
+                why=why,
+            )
+        if signal.action == "突破确认再看":
+            if rr is None or rr < 1.0:
+                return CommanderCommand(
+                    conclusion="结论：现在不买，性价比太差",
+                    stock=f"就算站上 {trigger}，今天也先不进；等回踩出更好买点。",
+                    option="不做 CALL；风险收益比低于 1，时间损耗不划算。",
+                    cancel=f"跌破 {defense}，取消买入想法。",
+                    why=f"{why} 风险收益比 {signal.risk_reward}，这笔不值得硬做。",
+                )
+            size = _direct_position_size(signal)
+            strike = _strike_reference_text(trigger_value)
+            return CommanderCommand(
+                conclusion=f"结论：站稳 {trigger} 后试买 {size}",
+                stock=f"只有站稳 {trigger} 才动，最多试 {size} 仓；没站稳不买。",
+                option=f"站稳后再看 {window} CALL，行权价参考 {strike} 附近或略高一档。",
+                cancel=f"跌破 {defense}，取消买入想法。",
+                why=why,
+            )
+        return CommanderCommand(
+            conclusion="结论：现在不买，只观察",
+            stock=f"先放观察池；站稳 {trigger} 前不动。",
+            option="不做期权；现在不是进场点。",
+            cancel=f"跌破 {defense}，从机会池降级。",
+            why=why,
+        )
+
+    if signal.action in {"风险优先处理", "减仓观察"}:
+        strike = _strike_reference_text(defense_value)
+        return CommanderCommand(
+            conclusion="结论：现在减 1/3，先防守",
+            stock=f"先减 1/3；没有重新站回 {trigger} 前，不加仓。",
+            option=f"若继续跌破 {defense}，可看 {window} PUT，行权价参考 {strike} 附近或略低一档。",
+            cancel=f"重新站回 {trigger}，暂停继续减仓；跌破 {defense}，继续降风险。",
+            why=why,
+        )
+    if signal.action == "禁止追高":
+        return CommanderCommand(
+            conclusion="结论：持有，不追",
+            stock=f"有仓先拿；新仓不买。冲不上 {signal.target_line}，可减 1/4 锁利润。",
+            option="不做 CALL；短线过热时，期权容易亏时间价值。",
+            cancel=f"跌破 {defense}，减 1/3。",
+            why=why,
+        )
+    if signal.action == "继续持有":
+        return CommanderCommand(
+            conclusion="结论：持有，不加仓",
+            stock=f"已有仓继续拿；站稳 {trigger} 才考虑加 1/4，跌破 {defense} 减 1/3。",
+            option="不做期权；等更明确的突破或破位。",
+            cancel=f"跌破 {defense}，执行减仓；没跌破就不乱动。",
+            why=why,
+        )
+    return CommanderCommand(
+        conclusion=f"结论：现在不买，等 {trigger} 站稳",
+        stock=f"只有站稳 {trigger} 后，最多试 1/4 仓；没站稳不买。",
+        option="不做期权；方向没确认前 CALL/PUT 都容易被震荡消耗。",
+        cancel=f"跌破 {defense}，取消买入想法；已有仓考虑减 1/3。",
+        why=why,
+    )
+
+
+def _is_immediate_action_signal(signal: CommanderSignal) -> bool:
+    if signal.category == "market":
+        return signal.action == "风险优先处理"
+    if signal.category == "holding":
+        return signal.action in {"风险优先处理", "减仓观察", "禁止追高"}
+    if signal.category == "opportunity":
+        rr = _risk_reward_value(signal.risk_reward)
+        return signal.action == "突破确认再看" and rr is not None and rr >= 1.0
+    return False
+
+
 def _term_explanations(signal: CommanderSignal, *, max_items: int = 2) -> List[str]:
     text = " ".join([
         signal.action,
@@ -1226,7 +1381,11 @@ def build_us_commander_decision(
 
     action_candidates = [
         signal for signal in all_signals
-        if signal.score >= min_alert_score and _has_concrete_plan(signal)
+        if (
+            signal.score >= min_alert_score
+            and _has_concrete_plan(signal)
+            and _is_immediate_action_signal(signal)
+        )
     ]
     action_candidates.sort(key=lambda item: (item.priority, -item.score, item.code))
     return CommanderDecision(
@@ -1243,60 +1402,45 @@ def _commander_signal_line(
     *,
     compact: bool = False,
     show_term_explanations: bool = True,
+    config: Any = None,
 ) -> str:
-    evidence = "；".join(signal.evidence[:3])
-    stock_instruction = signal.stock_instruction or _action_plain_label(signal.action)
-    option_instruction = signal.option_instruction or "不做期权"
+    command = _direct_command_for_signal(signal, config)
     if compact:
         return (
-            f"- **{signal.code}**：股票：{stock_instruction}｜期权：{option_instruction}｜"
-            f"盯 {signal.trigger_line}｜错了看 {signal.defense_line}｜{signal.change_note}"
+            f"- **{signal.code}**：{command.conclusion}｜{command.stock}｜"
+            f"取消：{command.cancel}｜{signal.change_note}"
         )
 
-    term_lines = []
+    term_text = ""
     if show_term_explanations:
-        term_lines = [f"  {item}" for item in _term_explanations(signal, max_items=2)]
-    term_text = "\n".join(term_lines) if term_lines else "  暂无新术语，按价格计划执行。"
-    if _looks_like_price_line(signal.trigger_line):
-        watch_text = (
-            f"到了 {signal.trigger_line}，才考虑动作；"
-            f"上面可能卡住的位置是 {signal.target_line}。"
-        )
-    else:
-        watch_text = f"重点看：{signal.trigger_line}；确认信号：{signal.target_line}。"
-    if _looks_like_price_line(signal.defense_line):
-        defense_text = f"跌到 {signal.defense_line} 附近就要警惕/考虑减仓，不要硬扛。"
-    else:
-        defense_text = f"如果出现“{signal.defense_line}”，就先降速，别急着加仓。"
-    if signal.risk_reward == "N/A":
-        risk_reward_text = "这是市场环境信号，不单独算一笔交易的值不值，先用来决定今天偏进攻还是防守。"
-    else:
-        risk_reward_text = f"{signal.risk_reward}。数字越高越划算，低于1通常不舒服。"
+        explanations = _term_explanations(signal, max_items=1)
+        if explanations:
+            term_text = f"\n  专业词：{explanations[0]}"
 
     return (
-        f"- **{signal.code}｜{_action_plain_label(signal.action)}**\n"
-        f"  股票动作：{stock_instruction}\n"
-        f"  期权战术：{option_instruction}\n"
-        f"  为什么：{signal.status}。{signal.plain_explanation} 依据：{evidence}。\n"
-        f"  你要盯：{watch_text}\n"
-        f"  错了怎么办：{defense_text}\n"
-        f"  期权怎么想：{signal.option_plan or '不做期权：现在没有清晰方向。'}\n"
-        f"  这笔值不值得冒险：{risk_reward_text}\n"
-        f"  较上次：{signal.change_note}。\n"
-        f"  专业词翻译：\n{term_text}"
+        f"- **{signal.code}｜{command.conclusion}**\n"
+        f"  股票：{command.stock}\n"
+        f"  期权：{command.option}\n"
+        f"  取消：{command.cancel}\n"
+        f"  为什么：{command.why}\n"
+        f"  较上次：{signal.change_note}。"
+        f"{term_text}"
     )
 
 
 def _commander_summary(decision: CommanderDecision) -> str:
     risk_hits = [item.code for item in decision.action_signals if item.action in {"风险优先处理", "减仓观察"}]
-    opportunity_hits = [item.code for item in decision.opportunity_signals if item.score >= 70]
+    opportunity_hits = [
+        item.code for item in decision.opportunity_signals
+        if item.score >= 70 and (_risk_reward_value(item.risk_reward) or 0) >= 1.0
+    ]
     if risk_hits:
-        return f"{decision.market.stance}，今天先偏防守：先看 {'、'.join(risk_hits[:3])}，该减就减，别硬扛。"
+        return f"今天主策略：防守。先处理 {'、'.join(risk_hits[:3])}，该减 1/3 就减，不加仓硬扛。"
     if decision.market.score <= 42:
-        return f"{decision.market.stance}，今天先守仓位：不急着买，先看有没有该卖/该减的。"
+        return "今天主策略：防守。不急着买，先看有没有该卖/该减的。"
     if opportunity_hits:
-        return f"{decision.market.stance}，可以买入观察：只盯 {'、'.join(opportunity_hits[:3])}，站稳关键价才动。"
-    return f"{decision.market.stance}，现在不急着动：持有为主，没到关键价不买不卖。"
+        return f"今天主策略：小仓进攻。只盯 {'、'.join(opportunity_hits[:3])}，站稳触发价才试 1/4 或 1/3。"
+    return "今天主策略：观望/持有。没到关键价，不买也不卖。"
 
 
 def _format_us_commander_report(
@@ -1311,15 +1455,20 @@ def _format_us_commander_report(
     show_term_explanations = bool(getattr(config, "us_commander_show_term_explanations", True))
     max_learning_notes = int(getattr(config, "us_commander_max_learning_notes", 3))
     action_lines = [
-        _commander_signal_line(signal, show_term_explanations=show_term_explanations)
+        _commander_signal_line(
+            signal,
+            show_term_explanations=show_term_explanations,
+            config=config,
+        )
         for signal in decision.action_signals
-    ] or ["- 暂无必须立刻处理的信号；没有触发价就不行动。"]
+    ] or ["- 暂无必须马上买/卖的信号；没到价就不动。"]
 
     holding_lines = [
         _commander_signal_line(
             signal,
             compact=True,
             show_term_explanations=show_term_explanations,
+            config=config,
         )
         for signal in decision.holding_signals
     ] or ["- 未配置真实持仓列表。"]
@@ -1331,10 +1480,11 @@ def _format_us_commander_report(
                 _commander_signal_line(
                     signal,
                     show_term_explanations=show_term_explanations,
+                    config=config,
                 )
             )
     if not opportunity_lines:
-        opportunity_lines = ["- 暂无高质量机会；别为了交易而交易。"]
+        opportunity_lines = ["- 暂无可操作机会；别为了交易而交易。"]
 
     learning_notes = []
     seen_notes = set()
@@ -1352,7 +1502,7 @@ def _format_us_commander_report(
         f"{now_text}{forced_note} | {match.window.focus}",
         "提醒：这是条件型辅助判断，不是自动买卖指令。",
         "",
-        "## 现在要不要动",
+        "## 今天主策略",
         _commander_summary(decision),
         f"- 市场温度：{decision.market.stance} {decision.market.score}/100。{decision.market.summary}",
     ]
@@ -1360,7 +1510,7 @@ def _format_us_commander_report(
         report.extend(["", "## 指挥官补充", commander_note.strip()])
     report.extend([
         "",
-        "## 需要你现在留意",
+        "## 需要你马上看",
         *action_lines,
         "",
         "## 你的持仓",

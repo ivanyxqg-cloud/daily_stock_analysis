@@ -302,6 +302,9 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_option_min_dte=14,
             us_commander_option_max_dte=45,
             us_commander_option_max_risk_pct=1.0,
+            us_commander_directness="aggressive",
+            us_commander_position_sizing="relative",
+            us_commander_card_style="command_first",
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -322,17 +325,22 @@ class USIntradayRadarTestCase(unittest.TestCase):
         report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
 
         self.assertIn("美股智慧指挥官", report)
-        self.assertIn("现在要不要动", report)
-        self.assertIn("需要你现在留意", report)
+        self.assertIn("今天主策略", report)
+        self.assertIn("需要你马上看", report)
         self.assertIn("你的持仓", report)
         self.assertIn("可以盯的机会", report)
         self.assertIn("今天顺便学一个词", report)
-        self.assertIn("股票动作：", report)
-        self.assertIn("期权战术：", report)
-        self.assertIn("错了怎么办：", report)
-        self.assertIn("专业词翻译", report)
-        self.assertIn("PUT 是", report)
-        self.assertIn("CALL 是", report)
+        self.assertIn("结论：", report)
+        self.assertIn("股票：", report)
+        self.assertIn("期权：", report)
+        self.assertIn("取消：", report)
+        self.assertIn("为什么：", report)
+        self.assertIn("BABA｜结论：现在减 1/3", report)
+        self.assertIn("AAPL｜结论：现在不买，性价比太差", report)
+        self.assertIn("不做 CALL", report)
+        self.assertIn("2-6周 PUT", report)
+        self.assertNotIn("CALL观察", report)
+        self.assertNotIn("到了 203.00，才考虑动作", report)
         self.assertNotIn("走势偏强，继续观察", report)
 
     def test_commander_market_temperature_turns_defensive(self):
@@ -341,6 +349,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_intraday_alert_holding_change_pct=2.5,
             us_intraday_alert_index_change_pct=1.0,
             us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
             us_commander_risk_style="balanced",
             us_commander_max_actions=5,
             us_commander_max_opportunities=3,
@@ -375,6 +384,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_intraday_alert_holding_change_pct=2.5,
             us_intraday_alert_index_change_pct=1.0,
             us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
             us_commander_risk_style="balanced",
             us_commander_max_actions=5,
             us_commander_max_opportunities=3,
@@ -415,6 +425,58 @@ class USIntradayRadarTestCase(unittest.TestCase):
         for signal in decision.opportunity_signals:
             self.assertNotEqual(signal.trigger_line, "N/A")
             self.assertNotEqual(signal.defense_line, "N/A")
+
+    def test_commander_high_quality_opportunity_allows_relative_probe(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=[],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=60,
+            us_commander_memory_enabled=False,
+            us_commander_show_term_explanations=True,
+            us_commander_options_enabled=True,
+            us_commander_option_min_dte=14,
+            us_commander_option_max_dte=45,
+            us_commander_option_max_risk_pct=1.0,
+            us_commander_directness="aggressive",
+            us_commander_position_sizing="relative",
+            us_commander_card_style="command_first",
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_60",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_60",
+            now=datetime(2026, 6, 1, 10, 35, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "SPY": QuoteSnapshot(code="SPY", price=480, change_pct=0.8),
+            "QQQ": QuoteSnapshot(code="QQQ", price=510, change_pct=1.0),
+            "AAPL": QuoteSnapshot(
+                code="AAPL",
+                price=100,
+                change_pct=2.0,
+                ma5=99,
+                ma10=97,
+                ma20=95,
+                low=99,
+                high=120,
+                bias_pct=2.0,
+            ),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("AAPL｜结论：站稳 120.00 后试买 1/3", report)
+        self.assertIn("最多试 1/3 仓", report)
+        self.assertIn("2-6周 CALL", report)
 
     def test_commander_memory_marks_signal_changes(self):
         config = SimpleNamespace(

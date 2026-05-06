@@ -728,6 +728,9 @@ class Config:
     us_commander_option_min_dte: int = 14
     us_commander_option_max_dte: int = 45
     us_commander_option_max_risk_pct: float = 1.0
+    us_commander_directness: str = "aggressive"
+    us_commander_position_sizing: str = "relative"
+    us_commander_card_style: str = "command_first"
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1570,6 +1573,18 @@ class Config:
                 minimum=0.1,
                 maximum=5.0,
             ),
+            us_commander_directness=os.getenv(
+                'US_COMMANDER_DIRECTNESS',
+                'aggressive',
+            ).strip().lower(),
+            us_commander_position_sizing=os.getenv(
+                'US_COMMANDER_POSITION_SIZING',
+                'relative',
+            ).strip().lower(),
+            us_commander_card_style=os.getenv(
+                'US_COMMANDER_CARD_STYLE',
+                'command_first',
+            ).strip().lower(),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

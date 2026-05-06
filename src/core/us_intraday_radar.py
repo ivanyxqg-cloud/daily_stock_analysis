@@ -117,6 +117,9 @@ class CommanderSignal:
     confidence: float = 0.5
     plain_explanation: str = ""
     learning_note: str = ""
+    stock_instruction: str = ""
+    option_instruction: str = "不做期权"
+    option_plan: str = ""
     change_note: str = "新信号"
 
 
@@ -635,6 +638,112 @@ def _has_concrete_plan(signal: CommanderSignal) -> bool:
     return True
 
 
+def _option_window_text(config: Any) -> str:
+    min_days = int(getattr(config, "us_commander_option_min_dte", 14))
+    max_days = int(getattr(config, "us_commander_option_max_dte", 45))
+    max_days = max(min_days, max_days)
+    if min_days <= 14 and max_days <= 45:
+        return "2-6周"
+    if max_days <= 60:
+        return "3-8周"
+    return f"{min_days}-{max_days}天"
+
+
+def _option_budget_text(config: Any) -> str:
+    risk_pct = float(getattr(config, "us_commander_option_max_risk_pct", 1.0))
+    return f"单笔最多按账户 {risk_pct:.1f}% 以内的小额试错，期权权利金可能亏光"
+
+
+def _option_plan_text(
+    *,
+    direction: str,
+    snapshot: Optional[QuoteSnapshot],
+    trigger: Optional[float],
+    defense: Optional[float],
+    config: Any,
+    reason: str,
+) -> str:
+    if not bool(getattr(config, "us_commander_options_enabled", True)):
+        return "期权功能关闭。"
+    window = _option_window_text(config)
+    budget = _option_budget_text(config)
+    if direction == "call":
+        strike = trigger or (snapshot.price * 1.02 if snapshot and snapshot.price else None)
+        return (
+            f"CALL 只做条件单思路：期限看 {window}，行权价看 {_line_or_na(strike)} 附近或略高一档；"
+            f"只有站稳触发价再考虑，没站稳就不做。{budget}。理由：{reason}"
+        )
+    if direction == "put":
+        strike = defense or (snapshot.price * 0.98 if snapshot and snapshot.price else None)
+        return (
+            f"PUT 只做保护/看跌思路：期限看 {window}，行权价看 {_line_or_na(strike)} 附近或略低一档；"
+            f"只有跌破防守价或市场明显转坏再考虑。{budget}。理由：{reason}"
+        )
+    return "不做期权：当前没有清晰方向，期权时间损耗太快。"
+
+
+def _action_plain_label(action: str) -> str:
+    mapping = {
+        "继续持有": "持有：先拿着，但按防守价执行",
+        "减仓观察": "卖/减仓：先少拿一点，别硬扛",
+        "禁止追高": "不买：涨太快，先别追",
+        "等回踩": "等：回到舒服位置再看",
+        "突破确认再看": "买入观察：站稳关键价再考虑",
+        "加入关注": "只关注：先放进观察池",
+        "风险优先处理": "卖/防守：先保护本金",
+    }
+    return mapping.get(action, action)
+
+
+def _looks_like_price_line(value: str) -> bool:
+    text = str(value or "").strip().replace(",", "")
+    if not text or text == "N/A" or "%" in text:
+        return False
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _term_explanations(signal: CommanderSignal, *, max_items: int = 2) -> List[str]:
+    text = " ".join([
+        signal.action,
+        signal.status,
+        signal.trigger_line,
+        signal.defense_line,
+        signal.target_line,
+        signal.risk_reward,
+        signal.plain_explanation,
+        signal.learning_note,
+        " ".join(signal.evidence),
+        signal.option_instruction,
+        signal.option_plan,
+    ])
+    explanations: List[str] = []
+    seen_concepts = set()
+    candidates = [
+        ("MA20", "ma20", "MA20 就是 20日均线，可以理解为近一个月很多人看的防线。"),
+        ("20日均线", "ma20", "20日均线就是近一个月很多人看的防线。"),
+        ("乖离率", "bias", "乖离率就是价格涨太快，离正常节奏有点远。"),
+        ("VIX", "vix", "VIX 是恐慌指数，上升通常代表市场更紧张。"),
+        ("CALL", "call", "CALL 是看涨期权，适合用小额资金押“站稳后继续涨”。"),
+        ("PUT", "put", "PUT 是看跌/保护期权，适合用小额资金防“继续跌”。"),
+        ("风险收益比", "risk_reward", "风险收益比就是这笔值不值得冒险，越高越划算。"),
+        ("突破确认", "breakout", "突破确认不是看到涨就追，而是等价格站稳关键价。"),
+        ("减仓观察", "trim", "减仓观察不是清仓，是先少拿一点，别硬扛。"),
+    ]
+    for term, concept, explanation in candidates:
+        if term in text and concept not in seen_concepts:
+            seen_concepts.add(concept)
+            explanations.append(explanation)
+        if len(explanations) >= max_items:
+            break
+    if not explanations and signal.learning_note:
+        explanations.append(signal.learning_note)
+    return explanations[:max_items]
+
+
 def _market_temperature(snapshots: Dict[str, QuoteSnapshot]) -> MarketTemperature:
     score = 50.0
     evidence: List[str] = []
@@ -696,6 +805,9 @@ def _signal_dict(signal: CommanderSignal) -> Dict[str, Any]:
         "confidence": signal.confidence,
         "plain_explanation": signal.plain_explanation,
         "learning_note": signal.learning_note,
+        "stock_instruction": signal.stock_instruction,
+        "option_instruction": signal.option_instruction,
+        "option_plan": signal.option_plan,
     }
 
 
@@ -788,6 +900,9 @@ def _holding_commander_signal(
             confidence=0.2,
             plain_explanation="数据不足，只观察，不做动作。",
             learning_note="数据缺口：没有价格就没有交易计划，先不凭感觉行动。",
+            stock_instruction="不买/不卖：数据不足，先不动作",
+            option_instruction="不做期权",
+            option_plan="没有可靠价格时不碰期权。",
         )
 
     multiplier = _risk_style_multiplier(config)
@@ -816,6 +931,16 @@ def _holding_commander_signal(
         defense = stop
         plain = "先防守，别加仓；只有重新站回近期防线，才恢复观察。"
         note = "MA20：20日均线，常被用作波段持仓的重要防线。"
+        stock_instruction = "卖/减仓：先防守，别加仓"
+        option_instruction = "PUT保护优先"
+        option_plan = _option_plan_text(
+            direction="put",
+            snapshot=snapshot,
+            trigger=trigger,
+            defense=defense,
+            config=config,
+            reason="价格跌破近一个月防线，先保护仓位。",
+        )
         priority = 0
     elif change <= -abs(holding_threshold):
         action = "减仓观察"
@@ -825,6 +950,16 @@ def _holding_commander_signal(
         defense = stop
         plain = "今天转弱，先检查仓位和止损线，不急着补仓。"
         note = "减仓观察：不是立刻清仓，而是先把风险降下来，等重新转强。"
+        stock_instruction = "卖/减仓：先少拿一点，别硬扛"
+        option_instruction = "PUT观察"
+        option_plan = _option_plan_text(
+            direction="put",
+            snapshot=snapshot,
+            trigger=trigger,
+            defense=defense,
+            config=config,
+            reason="盘中转弱，若继续跌破防守价，可以用小额 PUT 做保护。",
+        )
         priority = 0
     elif snapshot.bias_pct is not None and snapshot.bias_pct > bias_threshold:
         action = "禁止追高"
@@ -834,6 +969,9 @@ def _holding_commander_signal(
         defense = stop
         plain = "涨得快但位置不舒服，等回踩到计划区再看。"
         note = "乖离率：价格离短期均线太远，代表短线追高风险。"
+        stock_instruction = "持有不追：有仓先拿，没仓不买"
+        option_instruction = "不做CALL"
+        option_plan = "不建议追 CALL：涨太快时买 CALL，容易买在情绪最热的时候。"
         priority = 1
     elif change >= abs(holding_threshold):
         action = "继续持有"
@@ -843,6 +981,16 @@ def _holding_commander_signal(
         defense = support or stop
         plain = "走势偏强，已有仓位先拿着；只有突破确认才考虑加。"
         note = "突破确认：不是看到上涨就追，而是等价格站上压力位。"
+        stock_instruction = "持有：先拿着，突破后再考虑加"
+        option_instruction = "CALL观察"
+        option_plan = _option_plan_text(
+            direction="call",
+            snapshot=snapshot,
+            trigger=trigger,
+            defense=defense,
+            config=config,
+            reason="已有强势，但要等站稳上方关键价，避免追高。",
+        )
         priority = 1
     elif snapshot.ma5 and snapshot.ma10 and snapshot.ma20 and snapshot.ma5 > snapshot.ma10 > snapshot.ma20:
         action = "继续持有"
@@ -852,6 +1000,9 @@ def _holding_commander_signal(
         defense = support or stop
         plain = "没有新动作，按原计划持有，破防守线再处理。"
         note = "多头排列：短期均线在中长期均线上方，说明趋势仍偏正。"
+        stock_instruction = "持有：没坏就先拿着"
+        option_instruction = "不做期权"
+        option_plan = "不做期权：信号不够强，期权会被时间损耗消耗。"
         priority = 2
     else:
         action = "突破确认再看"
@@ -861,6 +1012,9 @@ def _holding_commander_signal(
         defense = support or stop
         plain = "现在信号不够强，等站上触发线再说。"
         note = "确认信号：先让价格证明自己，再行动。"
+        stock_instruction = "不买：等站稳关键价"
+        option_instruction = "不做期权"
+        option_plan = "不做期权：方向没确认，CALL/PUT 都容易被震荡消耗。"
         priority = 3
 
     if market.score <= 42 and action in {"继续持有", "突破确认再看"}:
@@ -882,6 +1036,9 @@ def _holding_commander_signal(
         confidence=0.75 if score >= 70 else 0.55,
         plain_explanation=plain,
         learning_note=note,
+        stock_instruction=stock_instruction,
+        option_instruction=option_instruction,
+        option_plan=option_plan,
     )
 
 
@@ -913,6 +1070,13 @@ def _market_commander_signals(
             confidence=0.7,
             plain_explanation="市场情绪变化会影响所有成长股，先决定今天进攻还是防守。",
             learning_note="VIX：恐慌指数，上升通常代表市场更紧张。",
+            stock_instruction="减少进攻" if vix.change_pct > 0 else "持有观察",
+            option_instruction="PUT保护优先" if vix.change_pct > 0 else "不急做期权",
+            option_plan=(
+                "市场恐慌升温时，若持仓同步跌破防守价，可优先看小额 PUT 保护。"
+                if vix.change_pct > 0
+                else "恐慌降温时不急着买期权，先看持仓是否站稳。"
+            ),
         ))
 
     for code, label in (("QQQ", "科技主线"), ("SMH", "半导体主线"), ("SPY", "大盘")):
@@ -935,6 +1099,13 @@ def _market_commander_signals(
             confidence=0.65,
             plain_explanation=f"{label}会影响相关个股，先看主线再看单票。",
             learning_note=f"{code}：用来观察{label}的方向。",
+            stock_instruction="卖/防守：相关个股降速" if weaker else "持有：主线还支持",
+            option_instruction="PUT观察" if weaker else "CALL观察",
+            option_plan=(
+                f"{label}转弱时，相关持仓若跌破防守价，再看小额 PUT；没跌破不急。"
+                if weaker
+                else f"{label}偏强时，相关候选只有站上触发价，才看 CALL。"
+            ),
         ))
     return signals
 
@@ -965,18 +1136,34 @@ def _opportunity_commander_signal(
         score = 55
         plain = "可以放进观察池，但现在不适合追。"
         note = "观察池：先记录候选，不等于马上买。"
+        stock_instruction = "不买：涨太快，等回落"
+        option_instruction = "不做CALL"
+        option_plan = "不建议追 CALL：短线过热时，哪怕方向对，也容易被回落和时间损耗伤到。"
     elif bullish and safe_bias and (snapshot.change_pct or 0) >= 0.5:
         action = "突破确认再看"
         status = "趋势候选"
         score = 64 + raw_score * 4 + max(0, market.score - 50) * 0.25
         plain = "有趋势基础，但必须站上触发线才值得进一步看。"
         note = "风险收益比：用可能上行空间和止损距离比较，太差就不做。"
+        stock_instruction = "买入观察：站上关键价才考虑"
+        option_instruction = "CALL观察"
+        option_plan = _option_plan_text(
+            direction="call",
+            snapshot=snapshot,
+            trigger=resistance,
+            defense=stop or support,
+            config=config,
+            reason="趋势候选，但必须等价格站稳触发价。",
+        )
     else:
         action = "加入关注"
         status = "候选观察"
         score = 56 + raw_score * 3
         plain = "先加入观察，不急着动手。"
         note = "加入关注：先盯条件，不代表买入。"
+        stock_instruction = "只关注：还不到买点"
+        option_instruction = "不做期权"
+        option_plan = "不做期权：现在只是观察，不是进场点。"
 
     return CommanderSignal(
         code=snapshot.code,
@@ -997,6 +1184,9 @@ def _opportunity_commander_signal(
         confidence=0.55,
         plain_explanation=plain,
         learning_note=note,
+        stock_instruction=stock_instruction,
+        option_instruction=option_instruction,
+        option_plan=option_plan,
     )
 
 
@@ -1048,18 +1238,52 @@ def build_us_commander_decision(
     )
 
 
-def _commander_signal_line(signal: CommanderSignal, *, compact: bool = False) -> str:
+def _commander_signal_line(
+    signal: CommanderSignal,
+    *,
+    compact: bool = False,
+    show_term_explanations: bool = True,
+) -> str:
     evidence = "；".join(signal.evidence[:3])
+    stock_instruction = signal.stock_instruction or _action_plain_label(signal.action)
+    option_instruction = signal.option_instruction or "不做期权"
     if compact:
         return (
-            f"- **{signal.code}**：{signal.status}｜{signal.action}｜"
-            f"触发 {signal.trigger_line}｜防守 {signal.defense_line}｜{signal.change_note}"
+            f"- **{signal.code}**：股票：{stock_instruction}｜期权：{option_instruction}｜"
+            f"盯 {signal.trigger_line}｜错了看 {signal.defense_line}｜{signal.change_note}"
         )
+
+    term_lines = []
+    if show_term_explanations:
+        term_lines = [f"  {item}" for item in _term_explanations(signal, max_items=2)]
+    term_text = "\n".join(term_lines) if term_lines else "  暂无新术语，按价格计划执行。"
+    if _looks_like_price_line(signal.trigger_line):
+        watch_text = (
+            f"到了 {signal.trigger_line}，才考虑动作；"
+            f"上面可能卡住的位置是 {signal.target_line}。"
+        )
+    else:
+        watch_text = f"重点看：{signal.trigger_line}；确认信号：{signal.target_line}。"
+    if _looks_like_price_line(signal.defense_line):
+        defense_text = f"跌到 {signal.defense_line} 附近就要警惕/考虑减仓，不要硬扛。"
+    else:
+        defense_text = f"如果出现“{signal.defense_line}”，就先降速，别急着加仓。"
+    if signal.risk_reward == "N/A":
+        risk_reward_text = "这是市场环境信号，不单独算一笔交易的值不值，先用来决定今天偏进攻还是防守。"
+    else:
+        risk_reward_text = f"{signal.risk_reward}。数字越高越划算，低于1通常不舒服。"
+
     return (
-        f"- **{signal.code}**｜{signal.action}｜{signal.status}。"
-        f"触发：{signal.trigger_line}；防守：{signal.defense_line}；"
-        f"目标/压力：{signal.target_line}；风险收益比：{signal.risk_reward}。"
-        f"依据：{evidence}。{signal.plain_explanation} 较上次：{signal.change_note}。"
+        f"- **{signal.code}｜{_action_plain_label(signal.action)}**\n"
+        f"  股票动作：{stock_instruction}\n"
+        f"  期权战术：{option_instruction}\n"
+        f"  为什么：{signal.status}。{signal.plain_explanation} 依据：{evidence}。\n"
+        f"  你要盯：{watch_text}\n"
+        f"  错了怎么办：{defense_text}\n"
+        f"  期权怎么想：{signal.option_plan or '不做期权：现在没有清晰方向。'}\n"
+        f"  这笔值不值得冒险：{risk_reward_text}\n"
+        f"  较上次：{signal.change_note}。\n"
+        f"  专业词翻译：\n{term_text}"
     )
 
 
@@ -1067,12 +1291,12 @@ def _commander_summary(decision: CommanderDecision) -> str:
     risk_hits = [item.code for item in decision.action_signals if item.action in {"风险优先处理", "减仓观察"}]
     opportunity_hits = [item.code for item in decision.opportunity_signals if item.score >= 70]
     if risk_hits:
-        return f"{decision.market.stance}，先处理 {'、'.join(risk_hits[:3])}，再看机会。"
+        return f"{decision.market.stance}，今天先偏防守：先看 {'、'.join(risk_hits[:3])}，该减就减，别硬扛。"
     if decision.market.score <= 42:
-        return f"{decision.market.stance}，今天先守仓位，不急着新增。"
+        return f"{decision.market.stance}，今天先守仓位：不急着买，先看有没有该卖/该减的。"
     if opportunity_hits:
-        return f"{decision.market.stance}，可以盯 {'、'.join(opportunity_hits[:3])} 的触发位。"
-    return f"{decision.market.stance}，没有必须立刻行动的信号，按计划观察。"
+        return f"{decision.market.stance}，可以买入观察：只盯 {'、'.join(opportunity_hits[:3])}，站稳关键价才动。"
+    return f"{decision.market.stance}，现在不急着动：持有为主，没到关键价不买不卖。"
 
 
 def _format_us_commander_report(
@@ -1084,20 +1308,31 @@ def _format_us_commander_report(
 ) -> str:
     forced_note = " | 手动测试" if match.forced else ""
     now_text = match.now.strftime("%m-%d %H:%M ET")
+    show_term_explanations = bool(getattr(config, "us_commander_show_term_explanations", True))
+    max_learning_notes = int(getattr(config, "us_commander_max_learning_notes", 3))
     action_lines = [
-        _commander_signal_line(signal)
+        _commander_signal_line(signal, show_term_explanations=show_term_explanations)
         for signal in decision.action_signals
     ] or ["- 暂无必须立刻处理的信号；没有触发价就不行动。"]
 
     holding_lines = [
-        _commander_signal_line(signal, compact=True)
+        _commander_signal_line(
+            signal,
+            compact=True,
+            show_term_explanations=show_term_explanations,
+        )
         for signal in decision.holding_signals
     ] or ["- 未配置真实持仓列表。"]
 
     opportunity_lines = []
     for signal in decision.opportunity_signals:
         if _has_concrete_plan(signal):
-            opportunity_lines.append(_commander_signal_line(signal))
+            opportunity_lines.append(
+                _commander_signal_line(
+                    signal,
+                    show_term_explanations=show_term_explanations,
+                )
+            )
     if not opportunity_lines:
         opportunity_lines = ["- 暂无高质量机会；别为了交易而交易。"]
 
@@ -1108,7 +1343,7 @@ def _format_us_commander_report(
         if note and note not in seen_notes:
             seen_notes.add(note)
             learning_notes.append(f"- {note}")
-        if len(learning_notes) >= 4:
+        if len(learning_notes) >= max_learning_notes:
             break
 
     report = [
@@ -1117,7 +1352,7 @@ def _format_us_commander_report(
         f"{now_text}{forced_note} | {match.window.focus}",
         "提醒：这是条件型辅助判断，不是自动买卖指令。",
         "",
-        "## 现在结论",
+        "## 现在要不要动",
         _commander_summary(decision),
         f"- 市场温度：{decision.market.stance} {decision.market.score}/100。{decision.market.summary}",
     ]
@@ -1125,7 +1360,7 @@ def _format_us_commander_report(
         report.extend(["", "## 指挥官补充", commander_note.strip()])
     report.extend([
         "",
-        "## 需要你看",
+        "## 需要你现在留意",
         *action_lines,
         "",
         "## 你的持仓",
@@ -1134,14 +1369,15 @@ def _format_us_commander_report(
         "## 市场温度",
         *(decision.market.lines or ["- 暂无市场环境数据。"]),
         "",
-        "## 机会 Top 3",
+        "## 可以盯的机会",
         *opportunity_lines,
         "",
-        "## 学习注释",
+        "## 今天顺便学一个词",
         *(learning_notes or ["- 触发条件：先让价格到达计划位置，再考虑行动。"]),
         "",
         "## 纪律提醒",
         "- 没有触发价就不行动；先保护本金，再考虑机会。",
+        "- 期权只作为小额条件战术或保护思路，权利金可能亏光，不能当成重仓押注。",
     ])
     return "\n".join(report).strip() + "\n"
 

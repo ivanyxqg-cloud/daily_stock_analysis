@@ -295,6 +295,13 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_max_opportunities=3,
             us_commander_min_alert_score=70,
             us_commander_memory_enabled=True,
+            us_commander_language_style="plain_with_terms",
+            us_commander_show_term_explanations=True,
+            us_commander_max_learning_notes=3,
+            us_commander_options_enabled=True,
+            us_commander_option_min_dte=14,
+            us_commander_option_max_dte=45,
+            us_commander_option_max_risk_pct=1.0,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -315,13 +322,17 @@ class USIntradayRadarTestCase(unittest.TestCase):
         report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
 
         self.assertIn("美股智慧指挥官", report)
-        self.assertIn("现在结论", report)
-        self.assertIn("需要你看", report)
+        self.assertIn("现在要不要动", report)
+        self.assertIn("需要你现在留意", report)
         self.assertIn("你的持仓", report)
-        self.assertIn("机会 Top 3", report)
-        self.assertIn("学习注释", report)
-        self.assertIn("触发：", report)
-        self.assertIn("防守：", report)
+        self.assertIn("可以盯的机会", report)
+        self.assertIn("今天顺便学一个词", report)
+        self.assertIn("股票动作：", report)
+        self.assertIn("期权战术：", report)
+        self.assertIn("错了怎么办：", report)
+        self.assertIn("专业词翻译", report)
+        self.assertIn("PUT 是", report)
+        self.assertIn("CALL 是", report)
         self.assertNotIn("走势偏强，继续观察", report)
 
     def test_commander_market_temperature_turns_defensive(self):

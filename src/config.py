@@ -721,6 +721,13 @@ class Config:
     us_commander_max_opportunities: int = 3
     us_commander_min_alert_score: int = 70
     us_commander_memory_enabled: bool = True
+    us_commander_language_style: str = "plain_with_terms"
+    us_commander_show_term_explanations: bool = True
+    us_commander_max_learning_notes: int = 3
+    us_commander_options_enabled: bool = True
+    us_commander_option_min_dte: int = 14
+    us_commander_option_max_dte: int = 45
+    us_commander_option_max_risk_pct: float = 1.0
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1526,6 +1533,43 @@ class Config:
                 maximum=100,
             ),
             us_commander_memory_enabled=os.getenv('US_COMMANDER_MEMORY_ENABLED', 'true').lower() == 'true',
+            us_commander_language_style=os.getenv(
+                'US_COMMANDER_LANGUAGE_STYLE',
+                'plain_with_terms',
+            ).strip().lower(),
+            us_commander_show_term_explanations=os.getenv(
+                'US_COMMANDER_SHOW_TERM_EXPLANATIONS',
+                'true',
+            ).lower() == 'true',
+            us_commander_max_learning_notes=parse_env_int(
+                os.getenv('US_COMMANDER_MAX_LEARNING_NOTES'),
+                3,
+                field_name='US_COMMANDER_MAX_LEARNING_NOTES',
+                minimum=1,
+            ),
+            us_commander_options_enabled=os.getenv(
+                'US_COMMANDER_OPTIONS_ENABLED',
+                'true',
+            ).lower() == 'true',
+            us_commander_option_min_dte=parse_env_int(
+                os.getenv('US_COMMANDER_OPTION_MIN_DTE'),
+                14,
+                field_name='US_COMMANDER_OPTION_MIN_DTE',
+                minimum=1,
+            ),
+            us_commander_option_max_dte=parse_env_int(
+                os.getenv('US_COMMANDER_OPTION_MAX_DTE'),
+                45,
+                field_name='US_COMMANDER_OPTION_MAX_DTE',
+                minimum=1,
+            ),
+            us_commander_option_max_risk_pct=parse_env_float(
+                os.getenv('US_COMMANDER_OPTION_MAX_RISK_PCT'),
+                1.0,
+                field_name='US_COMMANDER_OPTION_MAX_RISK_PCT',
+                minimum=0.1,
+                maximum=5.0,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

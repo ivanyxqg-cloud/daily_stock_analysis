@@ -713,6 +713,14 @@ class Config:
     us_intraday_show_technical_details: bool = False
     us_intraday_dedupe_enabled: bool = True
     us_intraday_dedupe_lookback_hours: int = 24
+    us_commander_enabled: bool = False
+    us_commander_mode: str = "swing_intraday"
+    us_commander_risk_style: str = "balanced"
+    us_commander_llm_mode: str = "triggered"
+    us_commander_max_actions: int = 5
+    us_commander_max_opportunities: int = 3
+    us_commander_min_alert_score: int = 70
+    us_commander_memory_enabled: bool = True
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1494,6 +1502,30 @@ class Config:
                 field_name='US_INTRADAY_DEDUPE_LOOKBACK_HOURS',
                 minimum=1,
             ),
+            us_commander_enabled=os.getenv('US_COMMANDER_ENABLED', 'false').lower() == 'true',
+            us_commander_mode=os.getenv('US_COMMANDER_MODE', 'swing_intraday').strip().lower(),
+            us_commander_risk_style=os.getenv('US_COMMANDER_RISK_STYLE', 'balanced').strip().lower(),
+            us_commander_llm_mode=os.getenv('US_COMMANDER_LLM_MODE', 'triggered').strip().lower(),
+            us_commander_max_actions=parse_env_int(
+                os.getenv('US_COMMANDER_MAX_ACTIONS'),
+                5,
+                field_name='US_COMMANDER_MAX_ACTIONS',
+                minimum=1,
+            ),
+            us_commander_max_opportunities=parse_env_int(
+                os.getenv('US_COMMANDER_MAX_OPPORTUNITIES'),
+                3,
+                field_name='US_COMMANDER_MAX_OPPORTUNITIES',
+                minimum=1,
+            ),
+            us_commander_min_alert_score=parse_env_int(
+                os.getenv('US_COMMANDER_MIN_ALERT_SCORE'),
+                70,
+                field_name='US_COMMANDER_MIN_ALERT_SCORE',
+                minimum=1,
+                maximum=100,
+            ),
+            us_commander_memory_enabled=os.getenv('US_COMMANDER_MEMORY_ENABLED', 'true').lower() == 'true',
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

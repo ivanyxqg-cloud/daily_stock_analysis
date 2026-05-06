@@ -11,6 +11,8 @@ import pandas as pd
 
 from src.core.us_intraday_radar import (
     QuoteSnapshot,
+    build_us_commander_decision,
+    build_us_commander_report,
     build_quote_snapshots,
     build_us_intraday_radar_report,
     build_us_intraday_technical_report,
@@ -280,6 +282,172 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertIn("MA20", report)
         self.assertIn("乖离", report)
         self.assertIn("VIX 异动", report)
+
+    def test_commander_report_contains_concrete_action_plan(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["BABA", "QQQ"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=True,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_30",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_30",
+            now=datetime(2026, 6, 1, 10, 3, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "BABA": QuoteSnapshot(code="BABA", price=90, change_pct=-3.0, ma5=97, ma10=96, ma20=95, low=89, high=94),
+            "QQQ": QuoteSnapshot(code="QQQ", price=510, change_pct=1.2, ma5=504, ma10=500, ma20=492, low=505, high=515),
+            "VIX": QuoteSnapshot(code="VIX", price=22, change_pct=6.0),
+            "AAPL": QuoteSnapshot(code="AAPL", price=200, change_pct=1.2, ma5=198, ma10=195, ma20=190, low=196, high=203, bias_pct=1.0),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("美股智慧指挥官", report)
+        self.assertIn("现在结论", report)
+        self.assertIn("需要你看", report)
+        self.assertIn("你的持仓", report)
+        self.assertIn("机会 Top 3", report)
+        self.assertIn("学习注释", report)
+        self.assertIn("触发：", report)
+        self.assertIn("防守：", report)
+        self.assertNotIn("走势偏强，继续观察", report)
+
+    def test_commander_market_temperature_turns_defensive(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["QQQ"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_30",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_30",
+            now=datetime(2026, 6, 1, 10, 3, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "QQQ": QuoteSnapshot(code="QQQ", price=500, change_pct=-2.0, ma5=505, ma10=508, ma20=510, low=498, high=505),
+            "SPY": QuoteSnapshot(code="SPY", price=480, change_pct=-1.5),
+            "SMH": QuoteSnapshot(code="SMH", price=240, change_pct=-2.5),
+            "VIX": QuoteSnapshot(code="VIX", price=28, change_pct=12.0),
+            "HYG": QuoteSnapshot(code="HYG", price=74, change_pct=-0.8),
+        }
+
+        decision = build_us_commander_decision(config=config, match=match, snapshots=snapshots)
+
+        self.assertEqual(decision.market.stance, "偏防守")
+        self.assertTrue(any(signal.action == "风险优先处理" for signal in decision.action_signals))
+
+    def test_commander_opportunity_top_three_have_trigger_and_defense(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=[],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=60,
+            us_commander_memory_enabled=False,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_60",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_60",
+            now=datetime(2026, 6, 1, 10, 35, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "SPY": QuoteSnapshot(code="SPY", price=480, change_pct=1.0),
+            "QQQ": QuoteSnapshot(code="QQQ", price=510, change_pct=1.2),
+            "VIX": QuoteSnapshot(code="VIX", price=18, change_pct=-5.0),
+        }
+        for idx, code in enumerate(["AAPL", "MSFT", "NVDA", "AMD"], start=1):
+            snapshots[code] = QuoteSnapshot(
+                code=code,
+                price=100 + idx,
+                change_pct=1.0 + idx * 0.2,
+                ma5=99,
+                ma10=97,
+                ma20=95,
+                low=98,
+                high=104 + idx,
+                bias_pct=2.0,
+            )
+
+        decision = build_us_commander_decision(config=config, match=match, snapshots=snapshots)
+
+        self.assertLessEqual(len(decision.opportunity_signals), 3)
+        self.assertTrue(decision.opportunity_signals)
+        for signal in decision.opportunity_signals:
+            self.assertNotEqual(signal.trigger_line, "N/A")
+            self.assertNotEqual(signal.defense_line, "N/A")
+
+    def test_commander_memory_marks_signal_changes(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["BABA"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=True,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="power_hour",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="power_hour",
+            now=datetime(2026, 6, 1, 15, 35, tzinfo=ZoneInfo("America/New_York")),
+        )
+        previous_state = {
+            "signals": {
+                "BABA": {
+                    "action": "继续持有",
+                    "score": 55,
+                }
+            }
+        }
+        snapshots = {
+            "BABA": QuoteSnapshot(code="BABA", price=90, change_pct=-3.5, ma5=97, ma10=96, ma20=95, low=89, high=94),
+            "VIX": QuoteSnapshot(code="VIX", price=20, change_pct=1.0),
+        }
+
+        report, decision = build_us_commander_report(
+            config=config,
+            match=match,
+            snapshots=snapshots,
+            previous_state=previous_state,
+        )
+
+        self.assertIn("动作变化：继续持有 → 风险优先处理", report)
+        self.assertEqual(decision.holding_signals[0].change_note, "动作变化：继续持有 → 风险优先处理")
 
     def test_dedupe_skips_existing_window_marker(self):
         config = SimpleNamespace(

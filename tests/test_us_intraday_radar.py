@@ -657,6 +657,60 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertNotIn("较上次", report)
         self.assertLessEqual(len(non_empty_lines), 10)
 
+    def test_visual_commander_card_uses_tables_and_footer_glossary(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["BABA", "SNDK"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_brief_mode=True,
+            us_commander_visual_card=True,
+            us_commander_term_glossary_mode="footer",
+            us_commander_max_glossary_terms=2,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_30",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_30",
+            now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "BABA": QuoteSnapshot(code="BABA", price=90, change_pct=-4.0, ma20=100, low=89, high=94),
+            "VIX": QuoteSnapshot(code="VIX", price=22, change_pct=6.0),
+            "SNDK": QuoteSnapshot(
+                code="SNDK",
+                price=1406.32,
+                change_pct=-4.14,
+                quality=QuoteQuality(level="low", session="unknown", is_actionable=False),
+            ),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("# 开盘30分钟｜", report)
+        self.assertIn("## 要处理", report)
+        self.assertIn("| 股票 | 指令 | 触发 | 取消 |", report)
+        self.assertIn("| BABA | 减1/3 |", report)
+        self.assertIn("| SNDK | 不交易 | 等确认 | - |", report)
+        self.assertIn("## 可买", report)
+        self.assertIn("## 今日词典", report)
+        self.assertIn("VIX：恐慌指数", report)
+        self.assertNotIn("MA20：20日均线", report)
+        self.assertIn("仅辅助判断，不自动交易", report)
+        self.assertNotIn("专业词：", report)
+        self.assertNotIn("可以理解为", report)
+        self.assertNotIn("为什么：", report)
+        self.assertNotIn("较上次", report)
+
     def test_commander_market_temperature_turns_defensive(self):
         config = SimpleNamespace(
             portfolio_stock_list=["QQQ"],

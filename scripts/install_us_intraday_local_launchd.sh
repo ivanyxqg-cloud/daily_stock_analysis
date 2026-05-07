@@ -41,6 +41,14 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 "$VENV_DIR/bin/python" -m pip install -r "$REPO_DIR/requirements.txt"
 
+if ! command -v m2f >/dev/null 2>&1; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "npm not found; Telegram will fall back to text if image conversion is unavailable." >&2
+  else
+    npm install -g markdown-to-file
+  fi
+fi
+
 launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
 
 cat > "$PLIST_PATH" <<PLIST
@@ -71,6 +79,10 @@ cat > "$PLIST_PATH" <<PLIST
     <string>auto</string>
     <key>US_INTRADAY_FORCE_RUN</key>
     <string>false</string>
+    <key>MARKDOWN_TO_IMAGE_CHANNELS</key>
+    <string>telegram</string>
+    <key>MD2IMG_ENGINE</key>
+    <string>markdown-to-file</string>
   </dict>
 
   <key>StartInterval</key>

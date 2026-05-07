@@ -736,6 +736,9 @@ class Config:
     us_commander_card_style: str = "command_first"
     us_commander_brief_mode: bool = True
     us_commander_brief_max_lines: int = 8
+    us_commander_visual_card: bool = True
+    us_commander_term_glossary_mode: str = "footer"
+    us_commander_max_glossary_terms: int = 2
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1615,6 +1618,21 @@ class Config:
                 minimum=3,
                 maximum=20,
             ),
+            us_commander_visual_card=os.getenv(
+                'US_COMMANDER_VISUAL_CARD',
+                'true',
+            ).lower() == 'true',
+            us_commander_term_glossary_mode=os.getenv(
+                'US_COMMANDER_TERM_GLOSSARY_MODE',
+                'footer',
+            ).strip().lower(),
+            us_commander_max_glossary_terms=parse_env_int(
+                os.getenv('US_COMMANDER_MAX_GLOSSARY_TERMS'),
+                2,
+                field_name='US_COMMANDER_MAX_GLOSSARY_TERMS',
+                minimum=0,
+                maximum=5,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),
@@ -1673,7 +1691,7 @@ class Config:
             discord_max_words=parse_env_int(os.getenv('DISCORD_MAX_WORDS'), 2000, field_name='DISCORD_MAX_WORDS', minimum=1),
             markdown_to_image_channels=[
                 c.strip().lower()
-                for c in os.getenv('MARKDOWN_TO_IMAGE_CHANNELS', '').split(',')
+                for c in os.getenv('MARKDOWN_TO_IMAGE_CHANNELS', 'telegram').split(',')
                 if c.strip()
             ],
             markdown_to_image_max_chars=parse_env_int(
@@ -1682,7 +1700,7 @@ class Config:
                 field_name='MARKDOWN_TO_IMAGE_MAX_CHARS',
                 minimum=1,
             ),
-            md2img_engine=cls._parse_md2img_engine(os.getenv('MD2IMG_ENGINE', 'wkhtmltoimage')),
+            md2img_engine=cls._parse_md2img_engine(os.getenv('MD2IMG_ENGINE', 'markdown-to-file')),
             prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             sqlite_wal_enabled=os.getenv('SQLITE_WAL_ENABLED', 'true').lower() == 'true',

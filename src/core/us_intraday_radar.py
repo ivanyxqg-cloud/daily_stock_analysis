@@ -1139,6 +1139,46 @@ def _term_explanations(signal: CommanderSignal, *, max_items: int = 2) -> List[s
     return explanations[:max_items]
 
 
+def _term_glossary_entries(signals: Sequence[CommanderSignal], *, max_items: int = 2) -> List[str]:
+    if max_items <= 0:
+        return []
+    glossary = [
+        ("MA20", "ma20", "MA20：20日均线"),
+        ("20日均线", "ma20", "20日均线：近一个月均价"),
+        ("乖离率", "bias", "乖离率：偏离正常节奏"),
+        ("VIX", "vix", "VIX：恐慌指数"),
+        ("CALL", "call", "CALL：看涨期权"),
+        ("PUT", "put", "PUT：看跌/保护期权"),
+        ("风险收益比", "risk_reward", "风险收益比：值不值得冒险"),
+        ("突破确认", "breakout", "突破确认：站稳再做"),
+        ("减仓观察", "trim", "减仓观察：先降一部分风险"),
+    ]
+    entries: List[str] = []
+    seen_concepts = set()
+    for signal in signals:
+        text = " ".join([
+            signal.action,
+            signal.status,
+            signal.trigger_line,
+            signal.defense_line,
+            signal.target_line,
+            signal.risk_reward,
+            signal.plain_explanation,
+            signal.learning_note,
+            " ".join(signal.evidence),
+            signal.option_instruction,
+            signal.option_plan,
+        ])
+        for term, concept, explanation in glossary:
+            if term in text and concept not in seen_concepts:
+                seen_concepts.add(concept)
+                entries.append(explanation)
+                break
+        if len(entries) >= max_items:
+            break
+    return entries
+
+
 def _market_temperature(snapshots: Dict[str, QuoteSnapshot]) -> MarketTemperature:
     score = 50.0
     evidence: List[str] = []
@@ -1784,15 +1824,62 @@ def _brief_signal_text(signal: CommanderSignal, config: Any) -> str:
     return f"{signal.code}｜不买｜站稳 {trigger} 再看"
 
 
-def _format_us_commander_brief_report(
-    *,
-    config: Any,
-    match: IntradayWindowMatch,
-    decision: CommanderDecision,
-) -> str:
-    title = "盘前" if match.window.key == "pre_open" else match.window.label
-    max_lines = int(getattr(config, "us_commander_brief_max_lines", 8))
+def _visual_card_signal_cells(signal: CommanderSignal, config: Any) -> Tuple[str, str, str]:
+    trigger = signal.trigger_line or "-"
+    defense = signal.defense_line or "-"
+    if not signal.quote_actionable:
+        return "不交易", "等确认", "-"
+    if signal.category == "opportunity":
+        rr = _risk_reward_value(signal.risk_reward)
+        if signal.action == "突破确认再看" and rr is not None and rr >= 1.0:
+            return f"试{_direct_position_size(signal)}", f"站稳 {trigger}", f"破 {defense}"
+        return "不买", "等更好价格", "-"
+    if signal.action in {"风险优先处理", "减仓观察"}:
+        return "减1/3", f"破 {defense}", f"站回 {trigger}"
+    if signal.action == "禁止追高":
+        return "持有不追", "不加仓", f"破 {defense}"
+    if signal.status == "跌幅未被关键价确认":
+        return "先持有", f"破 {defense}", f"站回 {trigger}"
+    if signal.action == "继续持有":
+        return "持有不加", "无", f"破 {defense}"
+    return "不买", f"站稳 {trigger}", f"破 {defense}"
 
+
+def _visual_card_glossary_entries(
+    signals: Sequence[CommanderSignal],
+    config: Any,
+    *,
+    max_items: int = 2,
+) -> List[str]:
+    if max_items <= 0:
+        return []
+    glossary = [
+        ("MA20", "ma20", "MA20：20日均线"),
+        ("VIX", "vix", "VIX：恐慌指数"),
+        ("CALL", "call", "CALL：看涨期权"),
+        ("PUT", "put", "PUT：看跌/保护期权"),
+    ]
+    entries: List[str] = []
+    seen_concepts = set()
+    for signal in signals:
+        command, trigger, cancel = _visual_card_signal_cells(signal, config)
+        text = " ".join([signal.code, command, trigger, cancel])
+        for term, concept, explanation in glossary:
+            if term in text and concept not in seen_concepts:
+                seen_concepts.add(concept)
+                entries.append(explanation)
+                break
+        if len(entries) >= max_items:
+            break
+    return entries
+
+
+def _markdown_table_escape(value: str) -> str:
+    text = str(value or "-").strip()
+    return text.replace("|", "\\|")
+
+
+def _commander_priority_signals(decision: CommanderDecision, *, max_lines: int) -> List[CommanderSignal]:
     priority_signals: List[CommanderSignal] = []
     seen = set()
     for signal in decision.action_signals:
@@ -1811,19 +1898,38 @@ def _format_us_commander_brief_report(
             seen.add(signal.code)
     if not priority_signals:
         priority_signals = decision.holding_signals[: min(3, len(decision.holding_signals))]
+    return priority_signals[:max_lines]
 
-    watch_lines = [
-        _brief_signal_text(signal, config)
-        for signal in priority_signals[:max_lines]
-    ] or ["暂无必须处理"]
 
-    buy_lines: List[str] = []
+def _commander_buy_signals(decision: CommanderDecision, *, max_lines: int) -> List[CommanderSignal]:
+    buy_signals: List[CommanderSignal] = []
     for signal in decision.opportunity_signals:
         rr = _risk_reward_value(signal.risk_reward)
         if signal.quote_actionable and signal.action == "突破确认再看" and rr is not None and rr >= 1.0:
-            buy_lines.append(_brief_signal_text(signal, config))
-        if len(buy_lines) >= 3:
+            buy_signals.append(signal)
+        if len(buy_signals) >= max_lines:
             break
+    return buy_signals
+
+
+def _format_us_commander_brief_report(
+    *,
+    config: Any,
+    match: IntradayWindowMatch,
+    decision: CommanderDecision,
+) -> str:
+    title = "盘前" if match.window.key == "pre_open" else match.window.label
+    max_lines = int(getattr(config, "us_commander_brief_max_lines", 8))
+
+    watch_lines = [
+        _brief_signal_text(signal, config)
+        for signal in _commander_priority_signals(decision, max_lines=max_lines)
+    ] or ["暂无必须处理"]
+
+    buy_lines = [
+        _brief_signal_text(signal, config)
+        for signal in _commander_buy_signals(decision, max_lines=3)
+    ]
     if not buy_lines:
         buy_lines = ["暂无"]
 
@@ -1838,6 +1944,63 @@ def _format_us_commander_brief_report(
         "",
         "仅辅助判断，不自动交易。",
     ]).strip() + "\n"
+
+
+def _format_signal_table(signals: Sequence[CommanderSignal], config: Any) -> List[str]:
+    if not signals:
+        return ["暂无"]
+    lines = ["| 股票 | 指令 | 触发 | 取消 |", "|---|---|---|---|"]
+    for signal in signals:
+        command, trigger, cancel = _visual_card_signal_cells(signal, config)
+        lines.append(
+            "| "
+            + " | ".join([
+                _markdown_table_escape(signal.code),
+                _markdown_table_escape(command),
+                _markdown_table_escape(trigger),
+                _markdown_table_escape(cancel),
+            ])
+            + " |"
+        )
+    return lines
+
+
+def _format_us_commander_visual_card_report(
+    *,
+    config: Any,
+    match: IntradayWindowMatch,
+    decision: CommanderDecision,
+) -> str:
+    title = "盘前" if match.window.key == "pre_open" else match.window.label
+    action_signals = _commander_priority_signals(
+        decision,
+        max_lines=int(getattr(config, "us_commander_max_actions", 5)),
+    )
+    buy_signals = _commander_buy_signals(
+        decision,
+        max_lines=int(getattr(config, "us_commander_max_opportunities", 3)),
+    )
+    glossary_entries: List[str] = []
+    if str(getattr(config, "us_commander_term_glossary_mode", "footer") or "footer").lower() == "footer":
+        glossary_entries = _visual_card_glossary_entries(
+            [*action_signals, *buy_signals],
+            config,
+            max_items=int(getattr(config, "us_commander_max_glossary_terms", 2)),
+        )
+
+    lines = [
+        f"# {title}｜{_brief_summary_text(decision)}",
+        "",
+        "## 要处理",
+        *_format_signal_table(action_signals, config),
+        "",
+        "## 可买",
+        *_format_signal_table(buy_signals, config),
+    ]
+    if glossary_entries:
+        lines.extend(["", "## 今日词典", "；".join(glossary_entries)])
+    lines.extend(["", "> 仅辅助判断，不自动交易。"])
+    return "\n".join(lines).strip() + "\n"
 
 
 def _format_us_commander_report(
@@ -1955,6 +2118,13 @@ def build_us_commander_report(
         snapshots=snapshots,
         previous_state=previous_state,
     )
+    if bool(getattr(config, "us_commander_visual_card", False)):
+        report = _format_us_commander_visual_card_report(
+            config=config,
+            match=match,
+            decision=decision,
+        )
+        return report, decision
     if bool(getattr(config, "us_commander_brief_mode", True)):
         report = _format_us_commander_brief_report(
             config=config,
@@ -2640,12 +2810,19 @@ def run_us_intraday_radar(
             snapshots=snapshots,
             previous_state=previous_state,
         )
-        commander_note = _build_commander_llm_note(
-            config=config,
-            match=match,
-            decision=commander_decision,
-        )
-        if commander_note:
+        commander_note = None
+        if (
+            not bool(getattr(config, "us_commander_visual_card", False))
+            and not bool(getattr(config, "us_commander_brief_mode", True))
+        ):
+            commander_note = _build_commander_llm_note(
+                config=config,
+                match=match,
+                decision=commander_decision,
+            )
+        if (
+            commander_note
+        ):
             telegram_report = _format_us_commander_report(
                 config=config,
                 match=match,

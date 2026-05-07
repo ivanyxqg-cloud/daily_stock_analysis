@@ -25,11 +25,15 @@ from src.core.us_intraday_radar import (
 class FakeFetcher:
     def __init__(self, quotes):
         self.quotes = quotes
+        self.realtime_requests = []
+        self.daily_requests = []
 
     def get_realtime_quote(self, code, log_final_failure=True):
+        self.realtime_requests.append(code)
         return self.quotes.get(code)
 
     def get_daily_data(self, code, days=30):
+        self.daily_requests.append(code)
         return pd.DataFrame({"close": list(range(80, 110))}), "fake"
 
 
@@ -306,6 +310,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_directness="aggressive",
             us_commander_position_sizing="relative",
             us_commander_card_style="command_first",
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -361,6 +366,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_option_min_dte=14,
             us_commander_option_max_dte=45,
             us_commander_option_max_risk_pct=1.0,
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -415,6 +421,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_option_min_dte=14,
             us_commander_option_max_dte=45,
             us_commander_option_max_risk_pct=1.0,
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -472,6 +479,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_option_min_dte=14,
             us_commander_option_max_dte=45,
             us_commander_option_max_risk_pct=1.0,
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -535,6 +543,119 @@ class USIntradayRadarTestCase(unittest.TestCase):
         self.assertEqual(stale["SNDK"].quality.level, "low")
         self.assertTrue(fresh["AAPL"].quality.is_actionable)
         self.assertEqual(fresh["AAPL"].quality.level, "high")
+
+    def test_pre_open_fast_mode_uses_small_pool_and_skips_daily_history(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["AVGO", "SNDK"],
+            stock_list=["AVGO", "SNDK", "AAPL", "NVDA", "SPY", "QQQ", "VIX"],
+            us_intraday_radar_enabled=True,
+            us_intraday_windows=["pre_open"],
+            us_intraday_window_tolerance_minutes=18,
+            us_intraday_catchup_minutes=45,
+            us_intraday_close_catchup_minutes=120,
+            us_intraday_push_night=True,
+            us_intraday_dedupe_enabled=False,
+            us_intraday_dedupe_lookback_hours=24,
+            us_intraday_quote_freshness_minutes=20,
+            us_intraday_require_fresh_quotes=True,
+            us_intraday_pre_open_fast_mode=True,
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_intraday_opportunity_max=3,
+            us_intraday_max_action_items=5,
+            us_intraday_readable_report=True,
+            us_intraday_jargon_level="explained",
+            us_intraday_show_technical_details=False,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_llm_mode="always",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_brief_mode=True,
+            us_commander_brief_max_lines=8,
+            bias_threshold=5.0,
+        )
+        quote_time = datetime(2026, 6, 1, 9, 26, tzinfo=ZoneInfo("America/New_York"))
+        fetcher = FakeFetcher({
+            "AVGO": SimpleNamespace(code="AVGO", name="AVGO", price=100, change_pct=0.2, quote_time=quote_time, market_session="premarket", price_field="preMarketPrice"),
+            "SNDK": SimpleNamespace(code="SNDK", name="SNDK", price=1400, change_pct=-0.4, quote_time=quote_time, market_session="premarket", price_field="preMarketPrice"),
+            "SPY": SimpleNamespace(code="SPY", name="SPY", price=500, change_pct=0.1, quote_time=quote_time, market_session="premarket", price_field="preMarketPrice"),
+            "QQQ": SimpleNamespace(code="QQQ", name="QQQ", price=430, change_pct=0.1, quote_time=quote_time, market_session="premarket", price_field="preMarketPrice"),
+            "VIX": SimpleNamespace(code="VIX", name="VIX", price=18, change_pct=1.0, quote_time=quote_time, market_session="premarket", price_field="preMarketPrice"),
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with patch("src.core.us_intraday_radar.is_market_open", return_value=True):
+                    ok, message = run_us_intraday_radar(
+                        config=config,
+                        requested_window="pre_open",
+                        send_notification=False,
+                        fetcher_manager=fetcher,
+                        now=quote_time,
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(ok)
+        self.assertIn("us_intraday_radar_20260601_pre_open.md", message)
+        self.assertIn("AVGO", fetcher.realtime_requests)
+        self.assertIn("SNDK", fetcher.realtime_requests)
+        self.assertIn("SPY", fetcher.realtime_requests)
+        self.assertNotIn("AAPL", fetcher.realtime_requests)
+        self.assertNotIn("NVDA", fetcher.realtime_requests)
+        self.assertEqual(fetcher.daily_requests, [])
+
+    def test_brief_commander_report_is_short_and_command_only(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["BABA", "SNDK"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=70,
+            us_commander_memory_enabled=False,
+            us_commander_brief_mode=True,
+            us_commander_brief_max_lines=8,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="pre_open",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="pre_open",
+            now=datetime(2026, 6, 1, 9, 26, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "BABA": QuoteSnapshot(code="BABA", price=143, change_pct=0.2, low=141, high=146),
+            "SNDK": QuoteSnapshot(
+                code="SNDK",
+                price=1406.32,
+                change_pct=-4.14,
+                quality=QuoteQuality(level="low", session="unknown", is_actionable=False),
+            ),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+        non_empty_lines = [line for line in report.splitlines() if line.strip()]
+
+        self.assertIn("盘前｜主策略：", report)
+        self.assertIn("要看：", report)
+        self.assertIn("可买：", report)
+        self.assertIn("SNDK｜不交易｜行情不一致，等确认", report)
+        self.assertNotIn("为什么：", report)
+        self.assertNotIn("专业词", report)
+        self.assertNotIn("较上次", report)
+        self.assertLessEqual(len(non_empty_lines), 10)
 
     def test_commander_market_temperature_turns_defensive(self):
         config = SimpleNamespace(
@@ -639,6 +760,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_directness="aggressive",
             us_commander_position_sizing="relative",
             us_commander_card_style="command_first",
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(
@@ -682,6 +804,7 @@ class USIntradayRadarTestCase(unittest.TestCase):
             us_commander_max_opportunities=3,
             us_commander_min_alert_score=70,
             us_commander_memory_enabled=True,
+            us_commander_brief_mode=False,
             bias_threshold=5.0,
         )
         match = resolve_us_intraday_window(

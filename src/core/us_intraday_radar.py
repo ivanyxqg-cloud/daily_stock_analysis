@@ -591,6 +591,7 @@ def build_quote_snapshots(
     now: Optional[datetime] = None,
     freshness_minutes: int = 20,
     require_fresh_quotes: bool = True,
+    include_daily_history: bool = True,
 ) -> Dict[str, QuoteSnapshot]:
     snapshots: Dict[str, QuoteSnapshot] = {}
     quality_now = now or datetime.now(ZoneInfo("America/New_York"))
@@ -630,7 +631,8 @@ def build_quote_snapshots(
                 require_fresh_quotes=require_fresh_quotes,
             ),
         )
-        _augment_ma(snapshot, _daily_closes(fetcher_manager, code))
+        if include_daily_history:
+            _augment_ma(snapshot, _daily_closes(fetcher_manager, code))
         snapshots[code] = snapshot
     return snapshots
 
@@ -1746,6 +1748,98 @@ def _commander_summary(decision: CommanderDecision) -> str:
     return "今天主策略：观望/持有。没到关键价，不买也不卖。"
 
 
+def _pre_open_fast_mode_enabled(config: Any, match: IntradayWindowMatch) -> bool:
+    return (
+        match.window.key == "pre_open"
+        and bool(getattr(config, "us_intraday_pre_open_fast_mode", True))
+    )
+
+
+def _brief_summary_text(decision: CommanderDecision) -> str:
+    summary = _commander_summary(decision)
+    for prefix in ("今天主策略：", "主策略："):
+        if summary.startswith(prefix):
+            summary = summary[len(prefix):]
+    return summary.split("。", 1)[0].strip() or "观望"
+
+
+def _brief_signal_text(signal: CommanderSignal, config: Any) -> str:
+    if not signal.quote_actionable:
+        return f"{signal.code}｜不交易｜行情不一致，等确认"
+    trigger = signal.trigger_line
+    defense = signal.defense_line
+    if signal.category == "opportunity":
+        rr = _risk_reward_value(signal.risk_reward)
+        if signal.action == "突破确认再看" and rr is not None and rr >= 1.0:
+            return f"{signal.code}｜站稳 {trigger} 试{_direct_position_size(signal)}｜破 {defense} 取消"
+        return f"{signal.code}｜不买｜等更好价格"
+    if signal.action in {"风险优先处理", "减仓观察"}:
+        return f"{signal.code}｜减1/3｜站回 {trigger} 暂停"
+    if signal.action == "禁止追高":
+        return f"{signal.code}｜持有不追｜破 {defense} 减1/3"
+    if signal.status == "跌幅未被关键价确认":
+        return f"{signal.code}｜先持有｜破 {defense} 再减"
+    if signal.action == "继续持有":
+        return f"{signal.code}｜持有不加｜破 {defense} 减1/3"
+    return f"{signal.code}｜不买｜站稳 {trigger} 再看"
+
+
+def _format_us_commander_brief_report(
+    *,
+    config: Any,
+    match: IntradayWindowMatch,
+    decision: CommanderDecision,
+) -> str:
+    title = "盘前" if match.window.key == "pre_open" else match.window.label
+    max_lines = int(getattr(config, "us_commander_brief_max_lines", 8))
+
+    priority_signals: List[CommanderSignal] = []
+    seen = set()
+    for signal in decision.action_signals:
+        if signal.code not in seen:
+            priority_signals.append(signal)
+            seen.add(signal.code)
+    for signal in decision.holding_signals:
+        if signal.code in seen:
+            continue
+        if (
+            not signal.quote_actionable
+            or signal.action in {"风险优先处理", "减仓观察", "禁止追高"}
+            or signal.status == "跌幅未被关键价确认"
+        ):
+            priority_signals.append(signal)
+            seen.add(signal.code)
+    if not priority_signals:
+        priority_signals = decision.holding_signals[: min(3, len(decision.holding_signals))]
+
+    watch_lines = [
+        _brief_signal_text(signal, config)
+        for signal in priority_signals[:max_lines]
+    ] or ["暂无必须处理"]
+
+    buy_lines: List[str] = []
+    for signal in decision.opportunity_signals:
+        rr = _risk_reward_value(signal.risk_reward)
+        if signal.quote_actionable and signal.action == "突破确认再看" and rr is not None and rr >= 1.0:
+            buy_lines.append(_brief_signal_text(signal, config))
+        if len(buy_lines) >= 3:
+            break
+    if not buy_lines:
+        buy_lines = ["暂无"]
+
+    return "\n".join([
+        f"{title}｜主策略：{_brief_summary_text(decision)}",
+        "",
+        "要看：",
+        *watch_lines,
+        "",
+        "可买：",
+        *buy_lines,
+        "",
+        "仅辅助判断，不自动交易。",
+    ]).strip() + "\n"
+
+
 def _format_us_commander_report(
     *,
     config: Any,
@@ -1861,6 +1955,13 @@ def build_us_commander_report(
         snapshots=snapshots,
         previous_state=previous_state,
     )
+    if bool(getattr(config, "us_commander_brief_mode", True)):
+        report = _format_us_commander_brief_report(
+            config=config,
+            match=match,
+            decision=decision,
+        )
+        return report, decision
     report = _format_us_commander_report(
         config=config,
         match=match,
@@ -1871,6 +1972,8 @@ def build_us_commander_report(
 
 
 def _should_call_commander_llm(config: Any, match: IntradayWindowMatch, decision: CommanderDecision) -> bool:
+    if _pre_open_fast_mode_enabled(config, match):
+        return False
     mode = str(getattr(config, "us_commander_llm_mode", "triggered") or "triggered").lower()
     if mode in {"off", "false", "none"}:
         return False
@@ -2508,7 +2611,11 @@ def run_us_intraday_radar(
     holding_codes = _dedupe_codes(getattr(config, "portfolio_stock_list", []) or [])
     stock_codes = _dedupe_codes(getattr(config, "stock_list", []) or [])
     risk_codes = [code for code in DEFAULT_RISK_PROXY_ORDER if code in stock_codes or code in US_RISK_PROXIES]
-    opportunity_pool = [code for code in stock_codes if code not in set(holding_codes) and code not in US_RISK_PROXIES]
+    pre_open_fast_mode = _pre_open_fast_mode_enabled(config, match)
+    opportunity_pool = [] if pre_open_fast_mode else [
+        code for code in stock_codes
+        if code not in set(holding_codes) and code not in US_RISK_PROXIES
+    ]
     codes = _dedupe_codes(holding_codes + risk_codes + opportunity_pool)
 
     snapshots = build_quote_snapshots(
@@ -2517,6 +2624,7 @@ def run_us_intraday_radar(
         now=match.now,
         freshness_minutes=int(getattr(config, "us_intraday_quote_freshness_minutes", 20)),
         require_fresh_quotes=bool(getattr(config, "us_intraday_require_fresh_quotes", True)),
+        include_daily_history=not pre_open_fast_mode,
     )
     technical_report = build_us_intraday_technical_report(config=config, match=match, snapshots=snapshots)
     commander_decision: Optional[CommanderDecision] = None

@@ -715,6 +715,7 @@ class Config:
     us_intraday_dedupe_lookback_hours: int = 24
     us_intraday_require_fresh_quotes: bool = True
     us_intraday_quote_freshness_minutes: int = 20
+    us_intraday_pre_open_fast_mode: bool = True
     us_commander_enabled: bool = False
     us_commander_mode: str = "swing_intraday"
     us_commander_risk_style: str = "balanced"
@@ -733,6 +734,8 @@ class Config:
     us_commander_directness: str = "aggressive"
     us_commander_position_sizing: str = "relative"
     us_commander_card_style: str = "command_first"
+    us_commander_brief_mode: bool = True
+    us_commander_brief_max_lines: int = 8
 
     # === 通知配置（可同时配置多个，全部推送）===
     
@@ -1524,6 +1527,10 @@ class Config:
                 field_name='US_INTRADAY_QUOTE_FRESHNESS_MINUTES',
                 minimum=1,
             ),
+            us_intraday_pre_open_fast_mode=os.getenv(
+                'US_INTRADAY_PRE_OPEN_FAST_MODE',
+                'true',
+            ).lower() == 'true',
             us_commander_enabled=os.getenv('US_COMMANDER_ENABLED', 'false').lower() == 'true',
             us_commander_mode=os.getenv('US_COMMANDER_MODE', 'swing_intraday').strip().lower(),
             us_commander_risk_style=os.getenv('US_COMMANDER_RISK_STYLE', 'balanced').strip().lower(),
@@ -1597,6 +1604,17 @@ class Config:
                 'US_COMMANDER_CARD_STYLE',
                 'command_first',
             ).strip().lower(),
+            us_commander_brief_mode=os.getenv(
+                'US_COMMANDER_BRIEF_MODE',
+                'true',
+            ).lower() == 'true',
+            us_commander_brief_max_lines=parse_env_int(
+                os.getenv('US_COMMANDER_BRIEF_MAX_LINES'),
+                8,
+                field_name='US_COMMANDER_BRIEF_MAX_LINES',
+                minimum=3,
+                maximum=20,
+            ),
             wechat_webhook_url=os.getenv('WECHAT_WEBHOOK_URL'),
             feishu_webhook_url=os.getenv('FEISHU_WEBHOOK_URL'),
             feishu_webhook_secret=os.getenv('FEISHU_WEBHOOK_SECRET'),

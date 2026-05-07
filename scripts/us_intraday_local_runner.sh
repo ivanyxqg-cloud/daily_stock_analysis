@@ -10,6 +10,8 @@ REPO_DIR="${US_INTRADAY_REPO_DIR:-}"
 PYTHON_BIN="${US_INTRADAY_PYTHON_BIN:-$APP_SUPPORT_DIR/venv/bin/python}"
 WINDOW="${US_INTRADAY_WINDOW:-auto}"
 FORCE_RUN="${US_INTRADAY_FORCE_RUN:-false}"
+LOCK_DIR="${US_INTRADAY_LOCAL_LOCK_DIR:-$APP_SUPPORT_DIR/run.lock}"
+LOCK_TTL_SECONDS="${US_INTRADAY_LOCAL_LOCK_TTL_SECONDS:-900}"
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S %Z'
@@ -19,6 +21,34 @@ read_secret() {
   local key="$1"
   local service="$SERVICE_PREFIX.$key"
   security find-generic-password -a "$ACCOUNT" -s "$service" -w 2>/dev/null || true
+}
+
+acquire_lock() {
+  mkdir -p "$APP_SUPPORT_DIR"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    date +%s > "$LOCK_DIR/started_at"
+    echo "$$" > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+    return 0
+  fi
+
+  local now started age
+  now="$(date +%s)"
+  started="$(cat "$LOCK_DIR/started_at" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)"
+  age=$((now - started))
+  if [ "$age" -gt "$LOCK_TTL_SECONDS" ]; then
+    echo "[$(timestamp)] Removing stale local radar lock age=${age}s."
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      date +%s > "$LOCK_DIR/started_at"
+      echo "$$" > "$LOCK_DIR/pid"
+      trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+      return 0
+    fi
+  fi
+
+  echo "[$(timestamp)] Skipping: previous local radar run is still active."
+  exit 0
 }
 
 ny_weekday="$(TZ=America/New_York date +%u)"
@@ -44,6 +74,8 @@ if [ ! -x "$PYTHON_BIN" ]; then
   echo "[$(timestamp)] Run scripts/install_us_intraday_local_launchd.sh again."
   exit 0
 fi
+
+acquire_lock
 
 OPENAI_API_KEY="$(read_secret OPENAI_API_KEY)"
 TELEGRAM_BOT_TOKEN="$(read_secret TELEGRAM_BOT_TOKEN)"
@@ -81,6 +113,7 @@ export US_INTRADAY_DEDUPE_ENABLED="${US_INTRADAY_DEDUPE_ENABLED:-true}"
 export US_INTRADAY_DEDUPE_LOOKBACK_HOURS="${US_INTRADAY_DEDUPE_LOOKBACK_HOURS:-24}"
 export US_INTRADAY_REQUIRE_FRESH_QUOTES="${US_INTRADAY_REQUIRE_FRESH_QUOTES:-true}"
 export US_INTRADAY_QUOTE_FRESHNESS_MINUTES="${US_INTRADAY_QUOTE_FRESHNESS_MINUTES:-20}"
+export US_INTRADAY_PRE_OPEN_FAST_MODE="${US_INTRADAY_PRE_OPEN_FAST_MODE:-true}"
 export US_COMMANDER_ENABLED="${US_COMMANDER_ENABLED:-true}"
 export US_COMMANDER_MODE="${US_COMMANDER_MODE:-swing_intraday}"
 export US_COMMANDER_RISK_STYLE="${US_COMMANDER_RISK_STYLE:-balanced}"
@@ -99,6 +132,8 @@ export US_COMMANDER_OPTION_MAX_RISK_PCT="${US_COMMANDER_OPTION_MAX_RISK_PCT:-1.0
 export US_COMMANDER_DIRECTNESS="${US_COMMANDER_DIRECTNESS:-aggressive}"
 export US_COMMANDER_POSITION_SIZING="${US_COMMANDER_POSITION_SIZING:-relative}"
 export US_COMMANDER_CARD_STYLE="${US_COMMANDER_CARD_STYLE:-command_first}"
+export US_COMMANDER_BRIEF_MODE="${US_COMMANDER_BRIEF_MODE:-true}"
+export US_COMMANDER_BRIEF_MAX_LINES="${US_COMMANDER_BRIEF_MAX_LINES:-8}"
 export US_COMMANDER_MEMORY_DIR="${US_COMMANDER_MEMORY_DIR:-$APP_SUPPORT_DIR/commander-state}"
 export US_INTRADAY_LOCAL_MODE="true"
 export US_INTRADAY_LOCAL_MARKER_DIR="${US_INTRADAY_LOCAL_MARKER_DIR:-$APP_SUPPORT_DIR/markers}"

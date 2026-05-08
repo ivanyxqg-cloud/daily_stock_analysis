@@ -648,14 +648,61 @@ class USIntradayRadarTestCase(unittest.TestCase):
         report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
         non_empty_lines = [line for line in report.splitlines() if line.strip()]
 
-        self.assertIn("盘前｜主策略：", report)
-        self.assertIn("要看：", report)
+        self.assertIn("盘前｜", report)
+        self.assertNotIn("主策略：", report)
+        self.assertIn("处理：", report)
         self.assertIn("可买：", report)
-        self.assertIn("SNDK｜不交易｜行情不一致，等确认", report)
+        self.assertIn("SNDK｜不交易｜等确认｜行情不一致", report)
         self.assertNotIn("为什么：", report)
         self.assertNotIn("专业词", report)
         self.assertNotIn("较上次", report)
+        self.assertNotIn("| 股票 |", report)
+        self.assertNotIn("Markdown 已转换为图片", report)
         self.assertLessEqual(len(non_empty_lines), 10)
+
+    def test_brief_commander_report_uses_direct_trade_commands(self):
+        config = SimpleNamespace(
+            portfolio_stock_list=["BABA"],
+            us_intraday_alert_holding_change_pct=2.5,
+            us_intraday_alert_index_change_pct=1.0,
+            us_intraday_alert_vix_change_pct=5.0,
+            us_commander_enabled=True,
+            us_commander_risk_style="balanced",
+            us_commander_max_actions=5,
+            us_commander_max_opportunities=3,
+            us_commander_min_alert_score=60,
+            us_commander_memory_enabled=False,
+            us_commander_brief_mode=True,
+            us_commander_visual_card=False,
+            bias_threshold=5.0,
+        )
+        match = resolve_us_intraday_window(
+            enabled=True,
+            configured_windows="open_30",
+            tolerance_minutes=18,
+            force_run=True,
+            requested_window="open_30",
+            now=datetime(2026, 6, 1, 10, 2, tzinfo=ZoneInfo("America/New_York")),
+        )
+        snapshots = {
+            "BABA": QuoteSnapshot(code="BABA", price=90, change_pct=-4.0, ma20=100, low=89, high=94),
+            "AAPL": QuoteSnapshot(code="AAPL", price=100, change_pct=2.0, ma5=99, ma10=98, ma20=95, low=99, high=120),
+        }
+
+        report = build_us_intraday_radar_report(config=config, match=match, snapshots=snapshots)
+
+        self.assertIn("处理：", report)
+        self.assertIn("BABA｜卖1/3｜跌破", report)
+        self.assertIn("｜站回", report)
+        self.assertIn("停", report)
+        self.assertIn("可买：", report)
+        self.assertIn("AAPL｜买", report)
+        self.assertIn("站稳", report)
+        self.assertIn("买｜跌破", report)
+        self.assertIn("取消", report)
+        self.assertNotIn("| 股票 |", report)
+        self.assertNotIn("为什么：", report)
+        self.assertNotIn("较上次", report)
 
     def test_visual_commander_card_uses_tables_and_footer_glossary(self):
         config = SimpleNamespace(

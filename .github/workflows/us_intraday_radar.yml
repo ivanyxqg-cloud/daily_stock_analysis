@@ -75,7 +75,6 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          npm install -g markdown-to-file
 
       - name: 执行美股盘中雷达
         env:
@@ -136,11 +135,11 @@ jobs:
           US_COMMANDER_CARD_STYLE: ${{ vars.US_COMMANDER_CARD_STYLE || secrets.US_COMMANDER_CARD_STYLE || 'command_first' }}
           US_COMMANDER_BRIEF_MODE: ${{ vars.US_COMMANDER_BRIEF_MODE || secrets.US_COMMANDER_BRIEF_MODE || 'true' }}
           US_COMMANDER_BRIEF_MAX_LINES: ${{ vars.US_COMMANDER_BRIEF_MAX_LINES || secrets.US_COMMANDER_BRIEF_MAX_LINES || '8' }}
-          US_COMMANDER_VISUAL_CARD: ${{ vars.US_COMMANDER_VISUAL_CARD || secrets.US_COMMANDER_VISUAL_CARD || 'true' }}
+          US_COMMANDER_VISUAL_CARD: ${{ vars.US_COMMANDER_VISUAL_CARD || secrets.US_COMMANDER_VISUAL_CARD || 'false' }}
           US_COMMANDER_TERM_GLOSSARY_MODE: ${{ vars.US_COMMANDER_TERM_GLOSSARY_MODE || secrets.US_COMMANDER_TERM_GLOSSARY_MODE || 'footer' }}
           US_COMMANDER_MAX_GLOSSARY_TERMS: ${{ vars.US_COMMANDER_MAX_GLOSSARY_TERMS || secrets.US_COMMANDER_MAX_GLOSSARY_TERMS || '2' }}
-          MARKDOWN_TO_IMAGE_CHANNELS: ${{ vars.MARKDOWN_TO_IMAGE_CHANNELS || secrets.MARKDOWN_TO_IMAGE_CHANNELS || 'telegram' }}
-          MD2IMG_ENGINE: ${{ vars.MD2IMG_ENGINE || secrets.MD2IMG_ENGINE || 'markdown-to-file' }}
+          MARKDOWN_TO_IMAGE_CHANNELS: ${{ vars.MARKDOWN_TO_IMAGE_CHANNELS || secrets.MARKDOWN_TO_IMAGE_CHANNELS || '' }}
+          MD2IMG_ENGINE: ${{ vars.MD2IMG_ENGINE || secrets.MD2IMG_ENGINE || 'wkhtmltoimage' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
           LOG_LEVEL: INFO
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'yfinance,tencent,akshare_sina,efinance,akshare_em' }}

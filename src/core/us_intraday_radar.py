@@ -1805,23 +1805,23 @@ def _brief_summary_text(decision: CommanderDecision) -> str:
 
 def _brief_signal_text(signal: CommanderSignal, config: Any) -> str:
     if not signal.quote_actionable:
-        return f"{signal.code}｜不交易｜行情不一致，等确认"
+        return f"{signal.code}｜不交易｜等确认｜行情不一致"
     trigger = signal.trigger_line
     defense = signal.defense_line
     if signal.category == "opportunity":
         rr = _risk_reward_value(signal.risk_reward)
         if signal.action == "突破确认再看" and rr is not None and rr >= 1.0:
-            return f"{signal.code}｜站稳 {trigger} 试{_direct_position_size(signal)}｜破 {defense} 取消"
-        return f"{signal.code}｜不买｜等更好价格"
+            return f"{signal.code}｜买{_direct_position_size(signal)}｜站稳{trigger}买｜跌破{defense}取消"
+        return f"{signal.code}｜不买｜等更好价格｜无"
     if signal.action in {"风险优先处理", "减仓观察"}:
-        return f"{signal.code}｜减1/3｜站回 {trigger} 暂停"
+        return f"{signal.code}｜卖1/3｜跌破{defense}卖｜站回{trigger}停"
     if signal.action == "禁止追高":
-        return f"{signal.code}｜持有不追｜破 {defense} 减1/3"
+        return f"{signal.code}｜持有｜不加仓｜跌破{defense}卖1/3"
     if signal.status == "跌幅未被关键价确认":
-        return f"{signal.code}｜先持有｜破 {defense} 再减"
+        return f"{signal.code}｜持有｜跌破{defense}卖1/3｜站回{trigger}继续拿"
     if signal.action == "继续持有":
-        return f"{signal.code}｜持有不加｜破 {defense} 减1/3"
-    return f"{signal.code}｜不买｜站稳 {trigger} 再看"
+        return f"{signal.code}｜持有｜无｜跌破{defense}卖1/3"
+    return f"{signal.code}｜不买｜站稳{trigger}再看｜跌破{defense}取消"
 
 
 def _visual_card_signal_cells(signal: CommanderSignal, config: Any) -> Tuple[str, str, str]:
@@ -1934,9 +1934,9 @@ def _format_us_commander_brief_report(
         buy_lines = ["暂无"]
 
     return "\n".join([
-        f"{title}｜主策略：{_brief_summary_text(decision)}",
+        f"{title}｜{_brief_summary_text(decision)}",
         "",
-        "要看：",
+        "处理：",
         *watch_lines,
         "",
         "可买：",
